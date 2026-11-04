@@ -35,20 +35,66 @@ static void *xcalloc(size_t n)
  * lines to the pre-seam runner; scripted carts add inputs= and
  * input_hash= to their TOY-RUN line so host/board diffs prove the
  * same script ran. The emu has no live input device in this mode;
- * live events would enter through the shared toy_queue_t helpers. */
+ * live events would enter through the shared toy_queue_t helpers.
+ *
+ * Signal seam (SIG-1): proof/run/frames instantiate the
+ * descriptor's synthetic proof spec (toy_sig_proof_source_init)
+ * and feed exactly samples_per_step frames BEFORE each step's
+ * apply()/step(), the boundary order feed -> apply -> step.
+ * Signal carts add sig=/stream= identity to TOY-RUN (study
+ * section 7); signal-deaf carts print byte-identical lines and
+ * the feed helper is a no-op. An underrun aborts the run here:
+ * proofs never zero-fill (study section 4 rule 4). */
 static void check_cart_input(const toy_cart_t *cart)
 {
     int rc = toy_cart_check_input(cart);
     if (rc) { fprintf(stderr, "bad input descriptor for %s (code %d)\n", cart->name, rc); exit(2); }
+    rc = toy_cart_check_signal(cart);
+    if (rc) { fprintf(stderr, "bad signal descriptor for %s (code %d)\n", cart->name, rc); exit(2); }
 }
 
-static void print_run_line(const toy_cart_t *cart)
+static toy_sig_source_t emu_sig_src;
+static int16_t emu_sig_frame[TOY_SIG_MAX_FRAME_VALUES];
+
+/* Proof source for cart, or NULL when signal-deaf. Source
+ * creation is the one place a future live mode would swap in
+ * a driver-backed source; the feed loop would not change. */
+static toy_sig_source_t *sig_setup(const toy_cart_t *cart)
+{
+    int created = toy_sig_proof_source_init(cart, &emu_sig_src);
+    if (created < 0) {
+        fprintf(stderr, "cannot instantiate proof signal for %s\n", cart->name);
+        exit(2);
+    }
+    return created ? &emu_sig_src : NULL;
+}
+
+static void sig_feed_or_die(const toy_cart_t *cart, void *st,
+                            toy_sig_source_t *src)
+{
+    int rc = toy_feed_step(cart, st, src, emu_sig_frame,
+                           TOY_SIG_MAX_FRAME_VALUES);
+    if (rc) {
+        fprintf(stderr, "signal feed failed for %s (code %d): proof aborted\n",
+                cart->name, rc);
+        exit(2);
+    }
+}
+
+static void print_run_line(const toy_cart_t *cart, const toy_sig_source_t *src)
 {
     printf("TOY-RUN cart=%s state_size=%zu hash=fnv1a64", cart->name, cart->state_size);
     if (cart->proof_input_count)
         printf(" inputs=%u input_hash=%016llx", cart->proof_input_count,
                (unsigned long long)toy_hash_inputs(cart->proof_inputs,
                                                    cart->proof_input_count));
+    if (src)
+        printf(" sig=%s device=%u scenario=%u seed=0x%llx rate=%u per_step=%u stream=%016llx",
+               toy_sig_kind_name(src->info.kind), src->info.device,
+               src->info.scenario_id,
+               (unsigned long long)src->info.seed,
+               src->info.sample_rate_hz, cart->sig_spec.samples_per_step,
+               (unsigned long long)src->info.stream_id);
     printf("\n");
 }
 
@@ -122,12 +168,14 @@ int main(int argc, char **argv)
         const toy_cart_t *cart = toy_cart_by_name(argv[2]);
         if (!cart) { fprintf(stderr, "unknown cart %s\n", argv[2]); return 2; }
         check_cart_input(cart);
+        toy_sig_source_t *sig = sig_setup(cart);
         void *st = xcalloc(cart->state_size);
         cart->reset(st);
         uint32_t cur = 0;
-        toy_apply_proof_at(cart, st, 0, &cur); /* step-0 setup */
-        print_run_line(cart);
+        toy_apply_proof_at(cart, st, 0, &cur); /* step-0 setup; no feed */
+        print_run_line(cart, sig);
         for (uint32_t s = 1; s <= cart->proof_steps; s++) {
+            sig_feed_or_die(cart, st, sig); /* feed -> apply -> step */
             toy_apply_proof_at(cart, st, s, &cur);
             cart->step(st);
             if (cart->proof_report_every && (s % cart->proof_report_every) == 0)
@@ -142,6 +190,7 @@ int main(int argc, char **argv)
         const toy_cart_t *cart = toy_cart_by_name(argv[2]);
         if (!cart) { fprintf(stderr, "unknown cart %s\n", argv[2]); return 2; }
         check_cart_input(cart);
+        toy_sig_source_t *sig = sig_setup(cart);
         int size = atoi(argv[3]);
         long spf = atol(argv[4]);
         if (spf == 0) spf = (long)cart->demo_steps_per_frame;
@@ -161,6 +210,7 @@ int main(int argc, char **argv)
         for (long fr = 0; fr < frames; fr++) {
             for (long s = 0; s < spf; s++) {
                 abs_step++;
+                sig_feed_or_die(cart, st, sig); /* feed -> apply -> step */
                 toy_apply_proof_at(cart, st, (uint32_t)abs_step, &cur);
                 cart->step(st);
             }
@@ -176,14 +226,16 @@ int main(int argc, char **argv)
         const toy_cart_t *cart = toy_cart_by_name(argv[2]);
         if (!cart) { fprintf(stderr, "unknown cart %s\n", argv[2]); return 2; }
         check_cart_input(cart);
+        toy_sig_source_t *sig = sig_setup(cart);
         long total = atol(argv[3]);
         long every = atol(argv[4]);
         void *st = xcalloc(cart->state_size);
         cart->reset(st);
         uint32_t cur = 0;
-        toy_apply_proof_at(cart, st, 0, &cur); /* step-0 setup */
-        print_run_line(cart);
+        toy_apply_proof_at(cart, st, 0, &cur); /* step-0 setup; no feed */
+        print_run_line(cart, sig);
         for (long s = 1; s <= total; s++) {
+            sig_feed_or_die(cart, st, sig); /* feed -> apply -> step */
             toy_apply_proof_at(cart, st, (uint32_t)s, &cur);
             cart->step(st);
             if (every > 0 && (s % every) == 0)
@@ -197,6 +249,12 @@ int main(int argc, char **argv)
     if (argc >= 2 && strcmp(argv[1], "save") == 0 && argc == 5) {
         const toy_cart_t *cart = toy_cart_by_name(argv[2]);
         if (!cart) { fprintf(stderr, "unknown cart %s\n", argv[2]); return 2; }
+        /* A signal source is host-owned and its position is not
+         * in TOYCKPT1, so an unfed save/resume would silently
+         * fork the stream. Refuse loudly until a restore parcel
+         * defines fast-forwarding the proof source to the
+         * header's step count x samples_per_step. */
+        if (cart->feed) { fprintf(stderr, "cart %s consumes a signal feed: checkpoints not supported for feed carts yet\n", cart->name); return 2; }
         unsigned long long steps = strtoull(argv[3], NULL, 10);
         void *st = xcalloc(cart->state_size);
         cart->reset(st);
@@ -244,6 +302,7 @@ int main(int argc, char **argv)
                     toy_ckpt_strerror(err));
             return 2;
         }
+        if (cart->feed) { fprintf(stderr, "cart %s consumes a signal feed: checkpoints not supported for feed carts yet (file left unchanged)\n", cart->name); return 2; }
         printf("TOY-RUN cart=%s state_size=%zu hash=fnv1a64\n", cart->name, cart->state_size);
         printf("TOY-CKPT-LOADED cart=%s step %llu hash %016llx file %s\n",
                cart->name, (unsigned long long)base_steps,

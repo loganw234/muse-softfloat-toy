@@ -35,9 +35,11 @@ study/parcel first.
   It does not allocate, print, read input, or branch on platform.
   Input reaches a cartridge only through the optional `apply()`
   callback at step boundaries (see "Input & settings seam");
-  `step()` itself stays input-free. `apply()` obeys the same
-  rules as `step()`: softfloat only, no allocation, no I/O, no
-  wall clock, bounded work, writes only its own state.
+  sensor samples reach it only through the optional `feed()`
+  callback at the same boundaries (see "Signal feed seam").
+  `step()` itself stays input-free. `apply()` and `feed()` obey
+  the same rules as `step()`: softfloat only, no allocation, no
+  I/O, no wall clock, bounded work, writes only its own state.
 - `render()` is `const` in effect as well as signature. It may use
   native `double` only to place already-computed state on screen;
   a value converted for display must never flow back into state.
@@ -103,6 +105,74 @@ the short contract summary.
   (`toy_apply_proof_at`, `toy_apply_live`, `toy_apply_queue`)
   only apply. `tools/input_test.c` is a runnable example of the
   whole seam with a minimal listening cart.
+
+## Signal feed seam
+
+Design and rationale: [study-signals.md](study-signals.md)
+(section 4 is the seam, section 7 the labelling rule; SIG-1,
+landed in Wave T2). Raw sensor streams are **not** events:
+they enter through this separate optional feed. This is the
+short contract summary.
+
+- Two descriptor fields are appended **after `state_version`**
+  (the WAVE-T2 tail order): `feed` and `sig_spec`
+  (`toy_sig_spec_t` in `core/toy_signal.h`: device, proof kind,
+  scenario, sample rate, samples-per-step, seed - integers
+  only). Both zero/NULL means no signal need (a *signal-deaf*
+  cart; proof hashes unchanged). A set `feed` requires a full
+  spec and vice versa; `toy_cart_check_signal` enforces it at
+  select on every runner. Rates bind statically - the source
+  must match device/channels/rate exactly, no resampling in
+  v1 - and one step's frame is bounded
+  (`samples_per_step <= TOY_SIG_MAX_SAMPLES_PER_STEP`).
+- At every step boundary the order is **feed -> apply ->
+  step**: the runner polls exactly `samples_per_step` frames
+  (a fixed, index-derived count, never clock-derived) and
+  calls `feed()` before that boundary's input events and
+  before `step()` integrates; there is no step-0 feed, the
+  first feed precedes step 1. `feed()` copies plain int16
+  sensor counts into POD state (conversion to softfloat is
+  the cart's job, through `toy_math.h`/`toy_f64_bits_*`); the
+  source itself is host-owned runner state, never hashed.
+  Hashes/checkpoints stay post-`step()` only.
+- Proofs are synthetic by construction in v1: every runner
+  (emu proof/run/frames, board proof, WASM `step`) instantiates
+  the descriptor's seeded synthetic spec through the shared
+  helpers (`toy_sig_proof_source_init` + `toy_feed_step` in
+  `core/toy_cart.h`), so a feed cart's proof stream is
+  host == board == WASM like any other. Only scenario 1
+  exists (IMU desk, MIC 440 Hz tone). Signal carts add
+  `sig=/device=/scenario=/seed=/rate=/per_step=/stream=` to
+  their `TOY-RUN` line; deaf lines are byte-identical.
+  `toy_sig_proof_source_init` is the single source-creation
+  point a future live driver swaps - the poll/feed loop does
+  not change - and a live run is never a proof run. Underrun
+  or end in a proof **fails the run**; samples are never
+  zero-filled or repeated into a proof.
+- Labelling is non-negotiable (study section 7): embed a
+  `toy_sig_label_t` in state, `toy_sig_label_reset` it in
+  `reset()` (kind `NONE` = visible "NO SIG", never a fake zero
+  trace) and `toy_sig_label_feed` it in `feed()`, so stream
+  kind, origin kind and `stream_id` sit inside the hashed
+  bytes. `render()` shows the provenance (`SYNTH`, `REPLAY-*`,
+  `LIVE`, `NO SIG`). `stream_id` for synthetic sources is the
+  parameter-block hash `toy_sig_param_stream_id`; runs are
+  comparable only if kind **and** id match.
+- The turn-the-device gesture's producer is in core:
+  `toy_dial_t` + `toy_dial_feed`/`toy_dial_feed_event`
+  (`core/toy_signal.h`) integrate IMU gyro-z into `TOY_EV_DIAL`
+  milliturn deltas with an integer accumulator (sub-milliturn
+  remainder kept, full turns never wrap). Embed it in state
+  to derive dial effects from your feed, or let a future live
+  runner own it and queue the events to `apply()`.
+- Checkpoints: the source position is host-owned and not in
+  `TOYCKPT1`, so `toy_emu save`/`load` currently **refuse**
+  feed carts loudly rather than resume unfed; a restore
+  parcel can later fast-forward a fresh synthetic source by
+  header steps x `samples_per_step`. Board firmware lists
+  `core/toy_signal.c` explicitly for on-device proof
+  instantiation. `tools/sigcore_test.c` is a runnable example
+  of the whole seam with a minimal IMU-consuming cart.
 
 ## Rendering rules
 
@@ -171,17 +241,24 @@ Rules that follow for cartridge authors:
 These are known before dispatching the first wave:
 
 - Input/settings seam landed (see "Input & settings seam"
-  above). Interactive carts are parcel-ready; the IMU dial
-  *producer* and raw sensor streams still wait for the signals
-  seam and kits.
+  above). Interactive carts are parcel-ready.
+- Signal feed seam landed (see "Signal feed seam" above),
+  including the IMU dial producer in core. Sensor carts are
+  parcel-ready against synthetic proof streams; LIVE drivers,
+  REPLAY proof bytes, further synthetic scenarios and a
+  gyro-coherent attitude model still wait for the kits and
+  their own parcels. Checkpoint save/load for feed carts is
+  refused until source-position restore lands.
 - Checkpoint core exists (`core/toy_ckpt.{h,c}`, host
   `save`/`load` - see [Checkpoints](#checkpoints) above), but
   the board flash-slot and browser IndexedDB backends are later
   parcels. Migration between `state_version`s is deliberately
   undefined while states are still changing: loaders reject,
   they never convert.
-- No audio output or sensor input abstraction; FFT/microphone/IMU
-  cartridges need a device-input study after the kits arrive.
+- No audio *output* abstraction yet. Sensor *input* exists
+  (signal feed seam above) for synthetic streams; live
+  microphone/IMU drivers land with the kits as a new source
+  kind behind the same feed.
 - `board/CMakeLists.txt` enumerates cartridge sources explicitly.
   That last manual line is intentional for now: it makes a new
   board-visible cartridge a reviewed change, not an accident of a

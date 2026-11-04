@@ -120,6 +120,137 @@ static int32_t scale_q8(int32_t value, int32_t gain_q8)
     return (int32_t)toy_sig_asr64(p + 128, 8);
 }
 
+uint32_t toy_sig_device_channels(uint32_t device)
+{
+    if (device == TOY_SIG_DEVICE_IMU6) return 6u;
+    if (device == TOY_SIG_DEVICE_MIC1) return 1u;
+    return 0u;
+}
+
+const char *toy_sig_kind_name(uint32_t kind)
+{
+    if (kind == TOY_SIG_KIND_SYNTHETIC) return "synthetic";
+    if (kind == TOY_SIG_KIND_REPLAY) return "replay";
+    if (kind == TOY_SIG_KIND_LIVE) return "live";
+    return "none";
+}
+
+uint64_t toy_sig_param_stream_id(const toy_sig_info_t *info)
+{
+    /* FNV-1a 64 over canonical little-endian fields, never over
+     * struct bytes (see toy_sig_hash_samples for the byte-order
+     * rule). stream_id itself is excluded by construction. */
+    uint32_t w32[8];
+    uint64_t h = 1469598103934665603ull;
+    if (!info) return 0;
+    w32[0] = info->kind;
+    w32[1] = info->orig_kind;
+    w32[2] = info->device;
+    w32[3] = info->channels;
+    w32[4] = info->sample_rate_hz;
+    w32[5] = info->scale_num;
+    w32[6] = info->scale2_num;
+    w32[7] = info->scenario_id;
+    for (int w = 0; w < 8; w++)
+        for (int b = 0; b < 4; b++) {
+            h ^= (uint64_t)((w32[w] >> (8 * b)) & 0xffu);
+            h *= 1099511628211ull;
+        }
+    for (int w = 0; w < 2; w++) {
+        uint64_t v = w == 0 ? info->seed : info->n_samples;
+        for (int b = 0; b < 8; b++) {
+            h ^= (uint64_t)((v >> (8 * b)) & 0xffu);
+            h *= 1099511628211ull;
+        }
+    }
+    return h;
+}
+
+/* --- labelling (study 7) ------------------------------------------- */
+
+void toy_sig_label_reset(toy_sig_label_t *l)
+{
+    if (!l) return;
+    l->stream_id = 0;
+    l->samples_seen = 0;
+    l->kind = TOY_SIG_KIND_NONE;
+    l->orig_kind = TOY_SIG_KIND_NONE;
+    l->device = 0;
+    l->gap_count = 0;
+}
+
+void toy_sig_label_feed(toy_sig_label_t *l, const toy_sig_info_t *info,
+                        uint32_t n_samples, uint32_t flags)
+{
+    if (!l || !info) return;
+    l->kind = info->kind;
+    l->orig_kind = info->orig_kind;
+    l->device = info->device;
+    l->stream_id = info->stream_id;
+    l->samples_seen += (uint64_t)n_samples;
+    if (flags & TOY_SIG_FLAG_UNDERRUN) l->gap_count++;
+}
+
+/* --- dial derivation: gyro-z -> milliturns ------------------------- */
+
+void toy_dial_reset(toy_dial_t *d, uint32_t scale_lsb_per_dps,
+                    uint32_t sample_rate_hz)
+{
+    if (!d) return;
+    d->accum_num = 0;
+    d->total_milliturns = 0;
+    d->scale_lsb_per_dps = scale_lsb_per_dps;
+    d->sample_rate_hz = sample_rate_hz;
+}
+
+void toy_dial_reset_for_info(toy_dial_t *d, const toy_sig_info_t *info)
+{
+    if (!info) {
+        toy_dial_reset(d, 0, 0);
+        return;
+    }
+    toy_dial_reset(d, info->scale2_num, info->sample_rate_hz);
+}
+
+int32_t toy_dial_feed(toy_dial_t *d, const int16_t *frames,
+                      uint32_t n_samples, uint32_t channels)
+{
+    int64_t denom, delta64;
+    if (!d || !frames || channels != 6u) return 0;
+    if (d->scale_lsb_per_dps == 0u || d->sample_rate_hz == 0u) return 0;
+    /* One milliturn of numerator: (LSB per deg/s) * 360 deg *
+     * samples/s, against gz*1000 per sample (see header). */
+    denom = (int64_t)d->scale_lsb_per_dps * 360 *
+            (int64_t)d->sample_rate_hz;
+    if (denom <= 0) return 0;
+    for (uint32_t i = 0; i < n_samples; i++)
+        d->accum_num += (int64_t)frames[(size_t)i * channels + 5u] * 1000;
+    /* C11 division truncates towards zero, so the remainder
+     * keeps the sign of rotation and |remainder| < denom in
+     * both directions: reverse rotation first pays back this
+     * call's partial milliturn before emitting negative ones. */
+    delta64 = d->accum_num / denom;
+    d->accum_num -= delta64 * denom;
+    d->total_milliturns += delta64;
+    if (delta64 > 2147483647ll) return 2147483647;
+    if (delta64 < -2147483647ll - 1ll) return -2147483647 - 1;
+    return (int32_t)delta64;
+}
+
+int toy_dial_feed_event(toy_dial_t *d, const int16_t *frames,
+                        uint32_t n_samples, uint32_t channels,
+                        toy_event_t *out)
+{
+    int32_t delta = toy_dial_feed(d, frames, n_samples, channels);
+    toy_event_t ev = { 0 };
+    if (!out || delta == 0) return 0;
+    ev.type = TOY_EV_DIAL;
+    ev.id = 0; /* the device itself */
+    ev.v = delta;
+    *out = ev;
+    return 1;
+}
+
 static void info_zero(toy_sig_info_t *i)
 {
     i->kind = TOY_SIG_KIND_NONE;
@@ -174,6 +305,9 @@ void toy_sig_synth_imu_init(toy_sig_synth_imu_t *s, uint64_t seed,
      * the number of warm-up draws is part of the definition. */
     for (int i = 0; i < 512; i++)
         for (int a = 0; a < 6; a++) (void)toy_bandnoise_next(&s->bn[a], &s->rng);
+    /* Name the stream before it exists, identically everywhere.
+     * Set last; the parameter hash excludes stream_id itself. */
+    s->info.stream_id = toy_sig_param_stream_id(&s->info);
 }
 
 void toy_sig_synth_imu_next(toy_sig_synth_imu_t *s, int16_t out6[6])
@@ -237,6 +371,7 @@ void toy_sig_synth_mic_init(toy_sig_synth_mic_t *s, uint64_t seed,
     s->bn.lp_fast = 0;
     s->bn.lp_slow = 0;
     for (int i = 0; i < 512; i++) (void)toy_bandnoise_next(&s->bn, &s->rng);
+    s->info.stream_id = toy_sig_param_stream_id(&s->info);
 }
 
 int16_t toy_sig_synth_mic_next(toy_sig_synth_mic_t *s)

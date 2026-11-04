@@ -242,5 +242,5 @@ static void carousel_render(const void *st_, toy_fb_t *fb)
 const toy_cart_t toy_cart_carousel = {
     "carousel", "Choreography Carousel",
     "Figure-8, Lagrange triangle and Euler line, two periods each, in turn.",
-    sizeof(carousel_state), 4, 4000, 500, carousel_reset, carousel_step, carousel_render, 0, 0, 0, 0, 0, 0, 0
+    sizeof(carousel_state), 4, 4000, 500, carousel_reset, carousel_step, carousel_render, 0, 0, 0, 0, 0, 0, 0, 0, { 0 }
 };

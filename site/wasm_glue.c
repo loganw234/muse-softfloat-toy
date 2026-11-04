@@ -30,6 +30,22 @@ static uint64_t toy_steps_done;
 static toy_queue_t toy_live_queue;
 static uint32_t toy_proof_cursor;
 
+/* Signal seam (SIG-1, runner-owned, never in state): select
+ * instantiates the descriptor's synthetic proof spec exactly
+ * as emu/board (toy_sig_proof_source_init is the one creation
+ * point a future live source would swap), and toy_wasm_step
+ * feeds exactly samples_per_step frames FIRST at each
+ * sub-step, then applies events, then steps - feed -> apply
+ * -> step. The Node checker is unchanged and its step(1)
+ * proof loop therefore covers signal carts automatically;
+ * signal-deaf carts never touch any of this. A synthetic
+ * source is unbounded, so a feed failure here is a logic
+ * error: the batch stops without stepping (the hash stalls
+ * and the checker fails) rather than inventing samples. */
+static toy_sig_source_t toy_sig_src;
+static int16_t toy_sig_frame[TOY_SIG_MAX_FRAME_VALUES];
+static int toy_sig_active;
+
 int toy_wasm_count(void) { return toy_cart_count; }
 
 static const toy_cart_t *cart_at(int index)
@@ -79,6 +95,9 @@ int toy_wasm_select(int index)
     const toy_cart_t *c = cart_at(index);
     if (!c || c->state_size > sizeof toy_state) return 0;
     if (toy_cart_check_input(c)) return 0;
+    if (toy_cart_check_signal(c)) return 0;
+    toy_sig_active = toy_sig_proof_source_init(c, &toy_sig_src);
+    if (toy_sig_active < 0) { toy_sig_active = 0; return 0; }
     toy_cart = c;
     toy_memset(toy_state, 0, sizeof toy_state);
     toy_cart->reset(toy_state);
@@ -94,6 +113,10 @@ void toy_wasm_step(uint32_t count)
     if (!toy_cart) return;
     if (count > 100000u) count = 100000u;
     for (uint32_t i = 0; i < count; i++) {
+        if (toy_feed_step(toy_cart, toy_state,
+                          toy_sig_active ? &toy_sig_src : 0,
+                          toy_sig_frame, TOY_SIG_MAX_FRAME_VALUES))
+            return; /* never invent samples; hash stalls, checker fails */
         uint32_t before = toy_proof_cursor;
         toy_apply_proof_at(toy_cart, toy_state,
                            (uint32_t)(toy_steps_done + 1),

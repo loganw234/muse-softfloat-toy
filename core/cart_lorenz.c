@@ -171,5 +171,5 @@ static void lorenz_render(const void *st_, toy_fb_t *fb)
 const toy_cart_t toy_cart_lorenz = {
     "lorenz", "The Butterfly",
     "Two Lorenz trajectories one ulp apart in a slowly turning view. They agree, then they do not.",
-    sizeof(lorenz_state), 20, 20000, 2000, lorenz_reset, lorenz_step, lorenz_render, 0, 0, 0, 0, 0, 0, 0
+    sizeof(lorenz_state), 20, 20000, 2000, lorenz_reset, lorenz_step, lorenz_render, 0, 0, 0, 0, 0, 0, 0, 0, { 0 }
 };

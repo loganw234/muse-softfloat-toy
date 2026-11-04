@@ -43,6 +43,7 @@ add_executable(toy_board
     ${TOY_ROOT}/core/cart_cloud.c
     ${TOY_ROOT}/core/cart_mandelbrot.c
     ${TOY_ROOT}/core/toy_fft.c
+    ${TOY_ROOT}/core/toy_signal.c
     ${TOY_ROOT}/core/cart_orbitspec.c
     ${LIB_SRC}
 )

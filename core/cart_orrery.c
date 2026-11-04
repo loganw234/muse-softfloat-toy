@@ -313,5 +313,5 @@ static void orrery_render(const void *st_, toy_fb_t *fb)
 const toy_cart_t toy_cart_orrery = {
     "orrery", "Orrery Clock",
     "JPL approximate Keplerian elements (J2000). A clock, not an ephemeris.",
-    sizeof(orrery_state), 1, 2000, 250, orrery_reset, orrery_step, orrery_render, 0, 0, 0, 0, 0, 0, 0
+    sizeof(orrery_state), 1, 2000, 250, orrery_reset, orrery_step, orrery_render, 0, 0, 0, 0, 0, 0, 0, 0, { 0 }
 };
