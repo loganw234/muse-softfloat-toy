@@ -92,3 +92,10 @@ separated two same-symptom twin plants by reset-bit and dt
 evidence), then check/WASM/board PASS with lead-pinned hashes
 identical to the parcel report. The one-ulp twins separate
 at step ~6.3k on the Pico exactly as on the host.
+
+`intervallens` landed next: planted verification 5/5 (an
+independent exact-range probe is now the standing way to check
+the enclosure), then check/WASM/board PASS with lead-pinned
+hashes identical to the parcel report. On-device tallies match
+host: 1852 certified-in / 1852 certified-out / 296 uncertain,
+zero containment violations over the proof.
