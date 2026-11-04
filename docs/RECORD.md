@@ -108,3 +108,12 @@ its demo pacing (75 steps/frame) is a deliberate time-lapse so
 a sheet spans one recurrence; whether an RP2040 sustains that
 live at 30 fps is unmeasured — the board gate proves the proof
 stream, not live pacing. Revisit at display-layer time.
+
+`orrery` landed next: planted verification 5/5, then
+check/WASM/board PASS with lead-pinned hashes identical to
+the parcel report (Mercury's 87.9694-day period and radius
+range reproduce on-device). The board capture window was
+raised 900 s -> 2400 s at this landing: with ten cartridges
+registered the cumulative on-device proof simply outgrew it
+(orrery was cut off at step 1500/2000 with every hash correct
+- a window limit, not a failure).
