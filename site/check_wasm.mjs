@@ -50,7 +50,10 @@ for (let i = 0; i < w.toy_wasm_count(); i++) {
       console.log(`${ok ? "PASS" : "FAIL"} ${name} step ${step} hash ${got}${ok ? "" : ` expected ${exp}`}`);
     }
   }
-  for (const size of [240, 360]) {
+  // Mock-device panels: proof hashes above stay pinned as-is;
+  // rendering must additionally produce a non-blank picture at
+  // every preset glass size the page offers.
+  for (const size of [240, 360, 466, 480]) {
     if (!w.toy_wasm_render(size)) throw new Error(`render failed for ${name} at ${size}`);
     const ptr = w.toy_wasm_framebuffer();
     const pixels = new Uint16Array(w.memory.buffer, ptr, size * size);
@@ -67,6 +70,24 @@ for (let i = 0; i < w.toy_wasm_count(); i++) {
              w.toy_wasm_clock_valid() === 0;
   if (!ok) failures++;
   console.log(`${ok ? "PASS" : "FAIL"} clock glue: valid=0 (unset)`);
+}
+{
+  // Mock-device surface: producers/params/session exports exist
+  // (they reach JS via export_name in wasm_glue.c, not the
+  // --export list), and a fresh select yields a well-formed
+  // empty TOYSESSION1 (the checker queues no live events).
+  const names = ["toy_wasm_queue_pointer", "toy_wasm_queue_dial",
+                 "toy_wasm_queue_tilt", "toy_wasm_queue_param",
+                 "toy_wasm_param_count", "toy_wasm_session_log"];
+  let ok = names.every((n) => typeof w[n] === "function");
+  if (ok) {
+    if (!w.toy_wasm_select(0)) throw new Error("re-select failed");
+    const log = cstr(w.toy_wasm_session_log());
+    ok = log === `TOYSESSION1 cart=${cstr(w.toy_wasm_name(0))}\nEND 0\n`;
+    if (!ok) console.log(`  session log was: ${JSON.stringify(log)}`);
+  }
+  if (!ok) failures++;
+  console.log(`${ok ? "PASS" : "FAIL"} mock device: exports present, empty session well-formed`);
 }
 console.log(failures ? `WASM CHECK: FAIL (${failures})` : "WASM CHECK: PASS");
 process.exit(failures ? 1 : 0);

@@ -287,6 +287,128 @@ kit. This is the short contract summary.
   the determinism firewall (identical step streams hash
   identically under unset/set/jumping clocks).
 
+## Web mock device
+
+The live site (`site/`) is a mock of the physical toy, used to
+rehearse driver-UX decisions before the kits exist: one live
+state presented on one round panel of selectable size, driven
+by the producers a real driver would own. It is a UI driver
+and timing model over the **unchanged** sim core — it does not
+simulate panel hardware, and neither display size nor browser
+pacing can touch sim state.
+
+- **Panel model.** Presets 240 (1.28″ RP2040), 360 (1.85″),
+  466 (1.75″ AMOLED), 480 (1.46″), or a custom square size
+  clamped to 64..1024 px. The canvas backing store is exactly
+  panel px (CSS scales the glass to fit) behind a round mask.
+  Switching size only re-renders the same state — no reset, no
+  step — and the always-visible step/state-hash line proves
+  continuity. The only size cap in the WASM runner is its
+  static framebuffer (`TOY_WASM_MAX_FB` 1024 in
+  `site/wasm_glue.c`, 2 MiB of RGB565); the render path itself
+  is size-parametric (`toy_fb_t` w/h, centre/radius drawing).
+- **Pointer producer.** Unchanged: presses inside the glass
+  circle queue `POINTER_*` as raw integer panel pixels; C
+  converts to milli-radius. Where a press lands fixes its
+  kind for the whole drag (see dial).
+- **Dial producer** (`TOY_EV_DIAL`, id 0, integer milliturns,
+  clockwise positive; only whole milliturns are emitted and
+  sub-milliturn remainders stay in the producer): mouse wheel
+  over the device, with `deltaY` normalised to pixels
+  (deltaMode lines ×16, pages ×400) and accumulated in
+  milli-pixels at **4800 px of travel per turn** (one emitted
+  milliturn consumes exactly 4800 milli-px); and bezel
+  rim-drag — a press outside the glass circle turns the
+  device, the unwrapped angle about the centre accumulating
+  at **2π/1000 rad per milliturn**. The page shows the
+  accumulated total.
+- **Tilt producer** (`TOY_EV_TILT`, id 0). A 2D pad whose knob
+  marks the direction things fall, in milli-g in the wire's
+  display space: `x` right, **`y` down** (carts flip to
+  sim-up where needed; the pinned gravity proof's
+  `TILT (300, 400)` is "toward display lower-right"). Each
+  axis is `round((2·(pos/extent) − 1) · 1000)`, clamped
+  ±1000; events emit on change only (deduped by milli value
+  in the producer). "Level" sends (0, 0).
+- **Settings.** Controls are built from the selected cart's
+  param table through the glue introspection exports
+  (`toy_wasm_param_*`): I32 slider+number, ENUM select, F64
+  slider+number over the declared decimal bounds (there is no
+  bool kind; a 0/1 ENUM covers it). A change queues
+  `SET_PARAM` via `toy_wasm_queue_param` (I32/ENUM in `v`;
+  F64 as the IEEE bits of the number the control shows — the
+  session log records the bits, so replays are exact; proofs
+  still build F64 from decimal strings via `toy_param_event`).
+  `RESET_ONLY` params are labelled, held pending, and queued
+  in param order on the next reset so they land in the step-0
+  slot; user-set live values re-queue the same way, so
+  settings persist across Reset. Untouched params are never
+  queued: declared defaults and compiled-in step-0 proof
+  settings are exactly what an untouched session runs. Carts
+  without params show "no settings". Producers a cart does
+  not advertise in `input_caps` are dimmed, and the glue
+  refuses their events regardless.
+- **Perf overlay.** Measured browser ms/step (exponential
+  rolling average over `toy_wasm_step` calls) and steps
+  behind the requested speed (requested − executed, which is
+  where the dropped-past-cap pacing debt shows). Labelled on
+  the page: browser timing only — board rates are records,
+  not scaled from this. No board numbers are invented here.
+
+### TOYSESSION1 session format (normative)
+
+The glue records every **drained live event** — recorded when
+`toy_apply_queue` applies it, not when it was queued, so
+carried events appear at the boundary that really applied
+them. `toy_wasm_session_log()` returns the text; the page's
+"Download session" saves it verbatim. Proof-script entries
+are not recorded (they are compiled into the cart and replay
+themselves); a replay therefore runs the named cart exactly
+as a proof run does (same proof script, same synthetic feed)
+and additionally applies the logged events at their steps,
+sharing the per-step cap after proof entries, exactly as the
+live drain did.
+
+```
+TOYSESSION1 cart=<name>
+<step> <type> <id> <x> <y> <v> <bits>
+...one line per drained live event, in drain order...
+[TRUNCATED dropped=<n>]
+END <total_steps_at_export>
+```
+
+- LF line endings, single spaces, no trailing spaces; the
+  final `END` line ends with LF.
+- `<step>` is the absolute step the event applied *before*
+  (runner steps completed + 1 at drain time), unsigned
+  decimal. Events at one step appear in FIFO drain order.
+- `<type>`, `<id>` unsigned decimal (`TOY_EV_*` values);
+  `<x>`, `<y>`, `<v>` signed decimal; `<bits>` the u64 as
+  unsigned decimal. `flags` is not recorded (producers always
+  queue 0 in v1; replay writes 0).
+- The header resets on every cart select/reset. A session
+  never spans carts.
+- The buffer is capped at 512 KiB (roughly 13 000 events).
+  Past the cap, event lines stop and are counted; export then
+  inserts `TRUNCATED dropped=<n>` before `END`. A truncated
+  session replays exactly only up to its last recorded event.
+- `END` is written at export time with the steps completed
+  as of that call, so an exported prefix of a still-running
+  session is itself well-formed. Events queued but not yet
+  drained are not in the log; replaying to `END` steps
+  reproduces the exported state hash.
+
+- **Honesty boundary.** Live producers exist **only** in
+  runners (here: page JS + glue exports); cartridges still
+  receive input solely through `apply()`/`feed()` at step
+  boundaries, and proof runs are unaffected — the Node
+  checker queues nothing, so pinned hashes cover the mock
+  build unchanged. Feed carts on this page still run their
+  synthetic proof streams (`toy_sig_proof_source_init`); the
+  mock adds no live sensor source and labels nothing LIVE.
+  Tilt/dial here rehearse the *events* a future IMU driver
+  will emit, not the IMU or its signal path.
+
 ## Required parcel evidence
 
 - `tools/run.sh check` passes (host determinism).
