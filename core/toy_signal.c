@@ -310,8 +310,111 @@ void toy_sig_synth_imu_init(toy_sig_synth_imu_t *s, uint64_t seed,
     s->info.stream_id = toy_sig_param_stream_id(&s->info);
 }
 
+/* --- synthetic IMU scenario 2 "chest" ------------------------------
+ * Modelled seismocardiography (SCG) magnitudes, NOT a recording:
+ * chest-wall micro-accelerations from the heartbeat are order
+ * g*1e-3 (typical features ~5 mg, placement-dependent; see the
+ * parcel report for the literature arithmetic). Shape tables are
+ * per-mille of each bump's peak: a sharp systolic complex ~12
+ * samples wide with a small undershoot, then a diastolic bump at
+ * +30 samples at ~40% - the doublet a naive threshold detector
+ * double-fires on, which is exactly why it is in the vector. */
+static const int16_t scg_sys[12] = {
+    0, 90, 300, 620, 900, 1000, 720, 300, -60, -180, -80, 0
+};
+static const int16_t scg_dia[8] = {
+    0, 200, 600, 1000, 700, 250, -80, 0
+};
+#define SCG_SYS_PEAK_LSB 82  /* ~5.0 mg at 16384 LSB/g */
+#define SCG_DIA_PEAK_LSB 33  /* ~40% of systolic (~2.0 mg) */
+#define SCG_DIA_AT       30u /* diastolic offset, samples */
+#define CHEST_BREATH_LSB 197 /* ~12 mg breathing on az */
+
+void toy_sig_synth_imu_chest_init(toy_sig_synth_imu_t *s, uint64_t seed,
+                                  uint32_t sample_rate_hz)
+{
+    info_zero(&s->info);
+    s->info.kind = TOY_SIG_KIND_SYNTHETIC;
+    s->info.orig_kind = TOY_SIG_KIND_SYNTHETIC;
+    s->info.device = TOY_SIG_DEVICE_IMU6;
+    s->info.channels = 6u;
+    s->info.sample_rate_hz = sample_rate_hz;
+    s->info.scale_num = 16384u;  /* LSB per g at +/-2 g      */
+    s->info.scale2_num = 128u;   /* LSB per deg/s at +/-256  */
+    s->info.scenario_id = 2u;    /* "chest"                  */
+    s->info.seed = seed;
+    s->info.n_samples = 0u;      /* unbounded until recorded */
+
+    /* Desk fields unused; zeroed so no stale state leaks in. */
+    s->tilt_amp_lsb = 0;
+    s->az_const_lsb = 16384;     /* flat on sternum: +1 g in +az */
+    s->tremor_amp = 0;
+    s->gyro_amp = 0;
+    s->tap_at = 0;
+    s->tap_amp_lsb = 0;
+    s->tilt_inc = 0;
+    s->tap_inc = 0;
+
+    s->breath_amp_lsb = CHEST_BREATH_LSB;
+    s->breath_inc = toy_sig_phase_inc(250u, sample_rate_hz); /* 0.25 Hz */
+    /* 75 BPM exactly: period = rate * 60 / 75 = rate*4/5 samples
+     * (80 at 100 Hz). Integer; rates not divisible by 5 truncate
+     * and the truncation is part of that stream's definition. */
+    s->beat_period = sample_rate_hz ? (sample_rate_hz * 4u) / 5u : 0u;
+    if (s->beat_period == 0u) s->beat_period = 1u;
+
+    s->seq = 0;
+    s->tilt_phase = 0;
+    s->tap_phase = 0;
+    s->tap_env = 0;
+    toy_rng_seed(&s->rng, seed);
+    for (int i = 0; i < 6; i++) { s->bn[i].lp_fast = 0; s->bn[i].lp_slow = 0; }
+    /* Seed varies phase/noise only: breathing starts at a random
+     * phase and the first systolic lands one full period in plus
+     * a random phase, so a consumer's baseline can settle on
+     * breathing before the first beat. Draw order is pinned. */
+    s->breath_phase = toy_rng_u32(&s->rng);
+    s->beat_first = (uint64_t)s->beat_period +
+                    (uint64_t)(toy_rng_u32(&s->rng) % s->beat_period);
+    s->info.stream_id = toy_sig_param_stream_id(&s->info);
+}
+
+/* Uniform integer noise in [-2, +2] LSB (~0.12 mg steps): the
+ * quantisation-class floor of this vector, deliberately far below
+ * the modelled sensor noise a real QMI8658C would add (report). */
+static int32_t chest_noise(toy_rng_t *r)
+{
+    return (int32_t)(toy_rng_u32(r) % 5u) - 2;
+}
+
+static void chest_next(toy_sig_synth_imu_t *s, int16_t out6[6])
+{
+    int32_t pulse = 0;
+    if (s->beat_period > 0u && s->seq >= s->beat_first) {
+        uint32_t pos = (uint32_t)((s->seq - s->beat_first) % s->beat_period);
+        if (pos < 12u)
+            pulse += (SCG_SYS_PEAK_LSB * (int32_t)scg_sys[pos]) / 1000;
+        if (pos >= SCG_DIA_AT && pos < SCG_DIA_AT + 8u)
+            pulse += (SCG_DIA_PEAK_LSB * (int32_t)scg_dia[pos - SCG_DIA_AT]) / 1000;
+    }
+    int32_t breath = scale_q15(toy_sig_sin_q15(s->breath_phase),
+                               s->breath_amp_lsb);
+    s->breath_phase += s->breath_inc;
+
+    int32_t v[6];
+    v[0] = pulse / 4 + breath / 16 + chest_noise(&s->rng);   /* ax spill */
+    v[1] = -(pulse / 6) + breath / 24 + chest_noise(&s->rng);/* ay spill */
+    v[2] = s->az_const_lsb + breath + pulse + chest_noise(&s->rng);
+    v[3] = chest_noise(&s->rng); /* gyro: no modelled rotation */
+    v[4] = chest_noise(&s->rng);
+    v[5] = chest_noise(&s->rng);
+    for (int a = 0; a < 6; a++) out6[a] = toy_sig_clamp_i16(v[a]);
+    s->seq++;
+}
+
 void toy_sig_synth_imu_next(toy_sig_synth_imu_t *s, int16_t out6[6])
 {
+    if (s->info.scenario_id == 2u) { chest_next(s, out6); return; }
     if (s->seq == s->tap_at) { s->tap_env = s->tap_amp_lsb; s->tap_phase = 0; }
 
     int32_t gx = scale_q15(toy_sig_sin_q15(s->tilt_phase), s->tilt_amp_lsb);
@@ -518,6 +621,22 @@ void toy_sig_source_synth_imu(toy_sig_source_t *src, uint64_t seed,
 {
     toy_sig_synth_imu_init(&src->synth_imu, seed, sample_rate_hz);
     src->info = src->synth_imu.info;
+}
+
+int toy_sig_source_synth_imu_scenario(toy_sig_source_t *src, uint64_t seed,
+                                      uint32_t sample_rate_hz,
+                                      uint32_t scenario_id)
+{
+    if (scenario_id == 1u) {
+        toy_sig_source_synth_imu(src, seed, sample_rate_hz);
+        return 0;
+    }
+    if (scenario_id == 2u) {
+        toy_sig_synth_imu_chest_init(&src->synth_imu, seed, sample_rate_hz);
+        src->info = src->synth_imu.info;
+        return 0;
+    }
+    return -1;
 }
 
 void toy_sig_source_synth_mic(toy_sig_source_t *src, uint64_t seed,

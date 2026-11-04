@@ -140,8 +140,12 @@ short contract summary.
   the descriptor's seeded synthetic spec through the shared
   helpers (`toy_sig_proof_source_init` + `toy_feed_step` in
   `core/toy_cart.h`), so a feed cart's proof stream is
-  host == board == WASM like any other. Only scenario 1
-  exists (IMU desk, MIC 440 Hz tone). Signal carts add
+  host == board == WASM like any other. Scenarios 1 (IMU
+  desk, MIC 440 Hz tone) and 2 (IMU6 chest: modelled breathing
+  + 75 BPM heart doublet, Wave T3) exist; the allowlist is
+  {1, 2} and a device/scenario combo with no generator (MIC
+  scenario 2) fails loud at source init. New scenarios are new
+  proof vectors, never edits to a pinned stream. Signal carts add
   `sig=/device=/scenario=/seed=/rate=/per_step=/stream=` to
   their `TOY-RUN` line; deaf lines are byte-identical.
   `toy_sig_proof_source_init` is the single source-creation
@@ -306,9 +310,10 @@ These are known before dispatching the first wave:
   above). Interactive carts are parcel-ready.
 - Signal feed seam landed (see "Signal feed seam" above),
   including the IMU dial producer in core. Sensor carts are
-  parcel-ready against synthetic proof streams; LIVE drivers,
-  REPLAY proof bytes, further synthetic scenarios and a
-  gyro-coherent attitude model still wait for the kits and
+  parcel-ready against synthetic proof streams (scenarios 1
+  desk and 2 chest); LIVE drivers, REPLAY proof bytes, further
+  synthetic scenarios and a gyro-coherent attitude model still
+  wait for the kits and
   their own parcels. Checkpoint save/load for feed carts is
   refused until source-position restore lands.
 - Checkpoint core exists (`core/toy_ckpt.{h,c}`, host

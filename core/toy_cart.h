@@ -98,6 +98,7 @@ extern const toy_cart_t toy_cart_gpend;
 extern const toy_cart_t toy_cart_seismo;
 extern const toy_cart_t toy_cart_attitude;
 extern const toy_cart_t toy_cart_synspec;
+extern const toy_cart_t toy_cart_heartbeat;
 
 extern const toy_cart_t *const toy_carts[];
 extern const int toy_cart_count;
@@ -257,8 +258,9 @@ static inline int toy_cart_check_input(const toy_cart_t *cart)
 
 /* Returns 0 if the descriptor's signal fields are consistent,
  * else a small nonzero code: 1 spec without feed or feed
- * without spec, 2 bad proof kind/scenario (v1: SYNTHETIC,
- * scenario 1 only), 3 unknown device, 4 bad rate or
+ * without spec, 2 bad proof kind/scenario (proof kind
+ * SYNTHETIC; scenarios 1 and 2 - device/scenario combos the
+ * generators cannot serve are refused at source init), 3 unknown device, 4 bad rate or
  * samples-per-step. Runners call once at select/start, beside
  * toy_cart_check_input. A signal-deaf cart passes trivially. */
 static inline int toy_cart_check_signal(const toy_cart_t *cart)
@@ -270,7 +272,7 @@ static inline int toy_cart_check_signal(const toy_cart_t *cart)
     if (!cart->feed) return spec_set ? 1 : 0;
     if (!spec_set) return 1;
     if (spec->proof_kind != TOY_SIG_KIND_SYNTHETIC) return 2;
-    if (spec->scenario_id != 1u) return 2;
+    if (spec->scenario_id != 1u && spec->scenario_id != 2u) return 2;
     if (toy_sig_device_channels(spec->device) == 0u) return 3;
     if (spec->sample_rate_hz == 0u) return 4;
     if (spec->samples_per_step == 0u ||
@@ -294,9 +296,15 @@ static inline int toy_sig_proof_source_init(const toy_cart_t *cart,
     if (!cart->feed) return 0;
     if (toy_cart_check_signal(cart)) return -1;
     if (spec->device == TOY_SIG_DEVICE_IMU6) {
-        toy_sig_source_synth_imu(src, spec->seed, spec->sample_rate_hz);
+        /* Scenario 1 "desk" or 2 "chest" (toy_signal.c). */
+        if (toy_sig_source_synth_imu_scenario(src, spec->seed,
+                                              spec->sample_rate_hz,
+                                              spec->scenario_id) != 0)
+            return -1;
     } else if (spec->device == TOY_SIG_DEVICE_MIC1) {
-        /* Scenario 1 (v1): fixed 440 Hz tone + hiss. */
+        /* Scenario 1 only: fixed 440 Hz tone + hiss. A MIC
+         * scenario-2 spec has no generator and fails loud. */
+        if (spec->scenario_id != 1u) return -1;
         toy_sig_source_synth_mic(src, spec->seed, spec->sample_rate_hz,
                                  440000u, 440000u, 0);
     } else {
