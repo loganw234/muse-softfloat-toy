@@ -117,3 +117,14 @@ raised 900 s -> 2400 s at this landing: with ten cartridges
 registered the cumulative on-device proof simply outgrew it
 (orrery was cut off at step 1500/2000 with every hash correct
 - a window limit, not a failure).
+
+`cloud` landed next: planted verification 5/5, then
+check/WASM/board PASS. Its proof horizon was trimmed by the
+lead at merge, 6000 -> 1000 steps (report every 250), after a
+timestamped on-device measurement: 434.4 ms/step on the
+RP2040 (fig8 35.9 ms, pendulum 109.7 ms for scale), so the
+parcel's 6000-step proof is a ~43-minute board run. Per-step
+maths is unchanged - the trimmed stream's step-1000 hash and
+the 10000-step check hash are the verified values - and the
+separation growth at 1000 steps is x244, per the parcel's own
+table.
