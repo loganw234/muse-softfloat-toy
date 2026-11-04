@@ -22,10 +22,12 @@
  * whose half-width is a fixed 5e-12 orbit units at any resolution.
  *
  * Descriptor choices (see parcel report for measurements):
- * demo 4 steps/frame matches fig8's screen speed; proof 6000
- * steps (~9.5 periods) is long enough for sep_max to grow roughly
- * three orders of magnitude from its ~1e-15 start yet short
- * enough to stay a routine proof at NCOPY fig8-steps per step.
+ * demo 4 steps/frame matches fig8's screen speed; proof 1000
+ * steps (~1.6 periods) already grows sep_max ~x244 from its
+ * 7e-16 start. (As landed the parcel used 6000; the lead
+ * trimmed it at merge after measuring 434 ms/step on the
+ * RP2040 - 6000 steps is a ~43-minute board proof, 1000 is
+ * ~7 minutes - with per-step maths unchanged.)
  * All state arithmetic is muse-softfloat binary64 via toy_math.h,
  * so every copy is bit-identical on host, board and WASM.
  * Textbook integrator only; no third-party code.
@@ -256,5 +258,5 @@ static void cloud_render(const void *st_, toy_fb_t *fb)
 const toy_cart_t toy_cart_cloud = {
     "cloud", "A Few Ulps of Weather",
     "12 figure-8s a few ulps apart, white is exact. Watch SEP grow.",
-    sizeof(cloud_state), 4, 6000, 1000, cloud_reset, cloud_step, cloud_render
+    sizeof(cloud_state), 4, 1000, 250, cloud_reset, cloud_step, cloud_render
 };
