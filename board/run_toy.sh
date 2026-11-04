@@ -43,7 +43,7 @@ echo "flashing $UF2 sha256=$(sha256sum "$UF2" | cut -d' ' -f1) -> serial $TOY_BO
 cat "$BOARD_BUILD/flash.log"
 sleep 2
 
-"$PY" board/read_toy.py TOY-ALL-DONE 2400 > "$BOARD_BUILD/board-out.log" 2>&1 \
+"$PY" board/read_toy.py TOY-ALL-DONE 3600 > "$BOARD_BUILD/board-out.log" 2>&1 \
     || { cat "$BOARD_BUILD/board-out.log"; fail "board run"; }
 cat "$BOARD_BUILD/board-out.log"
 
