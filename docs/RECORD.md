@@ -139,3 +139,14 @@ projected the original proof at ~24 minutes of board time.
 The cumulative board gate for all twelve cartridges now runs
 inside a 3600 s capture window. All ten Wave T1 cartridges
 are landed; the five seam studies follow.
+
+First study landed: `signals` (planted verification 5/5).
+The answer to "could we feed emulated signals to test with"
+is yes, prototyped: seeded integer-only synthetic IMU/mic
+streams behind one source abstraction, hash-identical across
+regeneration and TSIG replay (60 s desk IMU stream
+333c0854a00a61df on the lead's rerun), with stream kind
+carried in state so emulated data cannot alias measured.
+Merged with check/WASM PASS; the board firmware does not
+include this utility yet, so no board re-run was needed for
+this landing (host and WASM builds glob it in cleanly).
