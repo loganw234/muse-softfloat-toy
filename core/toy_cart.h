@@ -41,6 +41,7 @@ extern const toy_cart_t toy_cart_stagnation;
 extern const toy_cart_t toy_cart_microscope;
 extern const toy_cart_t toy_cart_harmonograph;
 extern const toy_cart_t toy_cart_lorenz;
+extern const toy_cart_t toy_cart_intervallens;
 
 extern const toy_cart_t *const toy_carts[];
 extern const int toy_cart_count;

@@ -37,6 +37,7 @@ add_executable(toy_board
     ${TOY_ROOT}/core/cart_microscope.c
     ${TOY_ROOT}/core/cart_harmonograph.c
     ${TOY_ROOT}/core/cart_lorenz.c
+    ${TOY_ROOT}/core/cart_intervallens.c
     ${LIB_SRC}
 )
 target_include_directories(toy_board PRIVATE ${LIB}/include ${TOY_ROOT}/core)

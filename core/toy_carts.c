@@ -10,6 +10,7 @@ const toy_cart_t *const toy_carts[] = {
     &toy_cart_microscope,
     &toy_cart_harmonograph,
     &toy_cart_lorenz,
+    &toy_cart_intervallens,
 };
 const int toy_cart_count = (int)(sizeof toy_carts / sizeof toy_carts[0]);
 
