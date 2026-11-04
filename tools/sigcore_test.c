@@ -312,7 +312,8 @@ int main(void)
      * the registry count itself is never hardcoded here (it
      * went stale twice: 13 after julia, 15 after gravity). */
     {
-        static const char *const feed_names[] = { "gpend", "seismo" };
+        static const char *const feed_names[] = { "gpend", "seismo",
+                                                  "attitude" };
         const toy_cart_t *fig8 = toy_cart_by_name("fig8");
         int registry_ok = fig8 != 0 && fig8->feed == 0;
         int feed_carts = 0;
