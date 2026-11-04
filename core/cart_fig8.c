@@ -135,5 +135,5 @@ static void fig8_render(const void *st_, toy_fb_t *fb)
 const toy_cart_t toy_cart_fig8 = {
     "fig8", "Eternal Return",
     "Three equal masses chase one curve forever. Watch the return.",
-    sizeof(fig8_state), 4, 2000, 500, fig8_reset, fig8_step, fig8_render, 0, 0, 0, 0, 0, 0, 0
+    sizeof(fig8_state), 4, 2000, 500, fig8_reset, fig8_step, fig8_render, 0, 0, 0, 0, 0, 0, 0, 0, { 0 }
 };

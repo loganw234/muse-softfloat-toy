@@ -144,5 +144,5 @@ static void pend_render(const void *st_, toy_fb_t *fb)
 const toy_cart_t toy_cart_pendulum = {
     "pendulum", "Twins, 1 ulp apart",
     "Two double pendulums differing by one ulp. They agree, then they do not.",
-    sizeof(pend_state), 30, 1000, 250, pend_reset, pend_step, pend_render, 0, 0, 0, 0, 0, 0, 0
+    sizeof(pend_state), 30, 1000, 250, pend_reset, pend_step, pend_render, 0, 0, 0, 0, 0, 0, 0, 0, { 0 }
 };

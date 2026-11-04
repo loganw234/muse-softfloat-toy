@@ -222,5 +222,5 @@ static void harm_render(const void *st_, toy_fb_t *fb)
 const toy_cart_t toy_cart_harmonograph = {
     "harmonograph", "Harmonograph",
     "Three damped pendulums draw one decaying Lissajous rosette, then retune.",
-    sizeof(harm_state), 16, 6000, 500, harm_reset, harm_step, harm_render, 0, 0, 0, 0, 0, 0, 0
+    sizeof(harm_state), 16, 6000, 500, harm_reset, harm_step, harm_render, 0, 0, 0, 0, 0, 0, 0, 0, { 0 }
 };

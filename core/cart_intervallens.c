@@ -256,5 +256,5 @@ static void ilens_render(const void *st_, toy_fb_t *fb)
 const toy_cart_t toy_cart_intervallens = {
     "intervallens", "Interval Lens",
     "A breathing orbit crosses the unit circle: certified in, certified out, or honestly unsure.",
-    sizeof(ilens_state), 10, 4000, 500, ilens_reset, ilens_step, ilens_render, 0, 0, 0, 0, 0, 0, 0
+    sizeof(ilens_state), 10, 4000, 500, ilens_reset, ilens_step, ilens_render, 0, 0, 0, 0, 0, 0, 0, 0, { 0 }
 };

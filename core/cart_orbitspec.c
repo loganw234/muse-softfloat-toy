@@ -301,5 +301,5 @@ const toy_cart_t toy_cart_orbitspec = {
     "orbitspec", "Orbital Spectrum",
     "The figure-8's radius, Fourier-read: lines at whole multiples.",
     sizeof(orbitspec_state), 4, 6000, 500,
-    orbitspec_reset, orbitspec_step, orbitspec_render, 0, 0, 0, 0, 0, 0, 0
+    orbitspec_reset, orbitspec_step, orbitspec_render, 0, 0, 0, 0, 0, 0, 0, 0, { 0 }
 };

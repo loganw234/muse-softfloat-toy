@@ -1,9 +1,11 @@
 /* toy_signal.h - deterministic sample sources for sensor carts.
  *
- * STUDY PROTOTYPE (docs/study-signals.md). One interface, three
- * source kinds: SYNTHETIC (generated from a seed, integer only),
- * REPLAY (a recorded byte stream replayed bit-exact) and LIVE
- * (a real driver, later; only the kind tag exists here).
+ * Design: docs/study-signals.md (SIG-1 landed in Wave T2: the
+ * cartridge feed seam in core/toy_cart.h consumes this). One
+ * interface, three source kinds: SYNTHETIC (generated from a
+ * seed, integer only), REPLAY (a recorded byte stream replayed
+ * bit-exact) and LIVE (a real driver, later; only the kind tag
+ * exists here, and proof runners instantiate SYNTHETIC only).
  *
  * Rules this file lives by, so a synthetic stream is identical on
  * host, RP2040/RP2350 and wasm32:
@@ -26,6 +28,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include "toy_input.h" /* toy_event_t for the dial derivation below */
 
 /* Source kinds. The kind is part of the labelling contract: it is
  * copied into cartridge state and rendered, so an emulated run can
@@ -65,6 +68,117 @@ typedef struct {
     uint64_t stream_id;
     uint64_t n_samples;     /* 0 = unbounded (live / long synth)  */
 } toy_sig_info_t;
+
+/* Interleaved channels for a TOY_SIG_DEVICE_*, or 0 if unknown. */
+uint32_t toy_sig_device_channels(uint32_t device);
+/* "none"/"synthetic"/"replay"/"live" for proof headers/labels. */
+const char *toy_sig_kind_name(uint32_t kind);
+/* stream_id for an unbounded synthetic stream: FNV-1a 64 over
+ * the canonical little-endian parameter block (kind, orig_kind,
+ * device, channels, rate, scales, scenario, seed, n_samples).
+ * The synthetic inits set info.stream_id to this, so every
+ * runner names the same (spec, seed) stream identically before
+ * a single sample exists. Replay streams instead carry the
+ * payload hash from their header - a different domain, and the
+ * kind word says which. Two runs are comparable only if BOTH
+ * kind and stream_id match. */
+uint64_t toy_sig_param_stream_id(const toy_sig_info_t *info);
+
+/* --- cartridge-facing declaration (SIG-1) ------------------------ */
+
+/* Bounds for one step's feed frame, so every runner can own a
+ * fixed static frame buffer: at most 1024 samples per step,
+ * at most 6144 interleaved int16 values (1024 x 6 channels). */
+#define TOY_SIG_MAX_SAMPLES_PER_STEP 1024u
+#define TOY_SIG_MAX_FRAME_VALUES \
+    (TOY_SIG_MAX_SAMPLES_PER_STEP * TOY_SIG_MAX_CHANNELS)
+
+/* Static signal need in the cartridge descriptor (core/toy_cart.h,
+ * appended after state_version). All-zero means no signal need.
+ * When feed() is set, every field binds statically (study 4 rule
+ * 3): runners refuse to start unless the instantiated source
+ * matches device/channel/rate, no resampling in v1.
+ * proof_kind names the source kind the standard proof run uses;
+ * SIG-1 implements exactly one proof kind, TOY_SIG_KIND_SYNTHETIC,
+ * on host/board/WASM alike, so a feed cart's proof hashes are
+ * comparable everywhere. LIVE has no proof run by definition;
+ * REPLAY proof bytes are a later parcel. scenario_id is 1 in v1
+ * (IMU "desk", MIC 440 Hz tone); new scenarios are new proof
+ * vectors, never edits to a pinned one. */
+typedef struct {
+    uint32_t device;           /* TOY_SIG_DEVICE_*               */
+    uint32_t proof_kind;       /* TOY_SIG_KIND_SYNTHETIC in v1   */
+    uint32_t scenario_id;      /* synthetic scenario, 1 in v1    */
+    uint32_t sample_rate_hz;   /* rate the cart's dt assumes     */
+    uint32_t samples_per_step; /* fixed frames fed before step() */
+    uint64_t seed;             /* synthetic proof seed           */
+} toy_sig_spec_t;
+
+/* The labelling rule (study 7) as a POD block a sensor cart
+ * embeds in its state, so kind/orig/stream identity sits inside
+ * the hashed bytes: a synthetic run can never hash-collide with
+ * a replay-of-live run on identical samples, and "no source" is
+ * KIND_NONE, rendered as NO SIG, never a flat zero trace.
+ * Fields ordered 8-byte first per the checkpoint layout rule. */
+typedef struct {
+    uint64_t stream_id;   /* from info at feed time             */
+    uint64_t samples_seen;/* frames fed so far (next seq)       */
+    uint32_t kind;        /* TOY_SIG_KIND_*; NONE until fed     */
+    uint32_t orig_kind;   /* for REPLAY: SYNTHETIC or LIVE      */
+    uint32_t device;      /* TOY_SIG_DEVICE_*                   */
+    uint32_t gap_count;   /* underruns fed as gaps (live only)  */
+} toy_sig_label_t;
+
+/* Call from reset() after the whole-struct memset: kind NONE,
+ * the visible no-signal state until the first feed. */
+void toy_sig_label_reset(toy_sig_label_t *l);
+/* Call from feed() with the same info/n/flags the runner handed
+ * over: copies identity into state, advances samples_seen, and
+ * counts a gap if UNDERRUN is set (proof runners fail loud on
+ * underrun and never reach feed(); a future live runner feeds
+ * the gap so the cart can show it). */
+void toy_sig_label_feed(toy_sig_label_t *l, const toy_sig_info_t *info,
+                        uint32_t n_samples, uint32_t flags);
+
+/* --- dial derivation: IMU gyro-z -> TOY_EV_DIAL -------------------
+ * The producer side of the turn-the-whole-device gesture
+ * (docs/WAVE-T2.md). Integer yaw integration over interleaved
+ * IMU6 frames: each sample adds gz*1000 to a numerator whose
+ * unit milliturn is scale_lsb_per_dps * 360 * rate (LSB/(deg/s)
+ * x deg/turn x samples/s, over the x1000 for milliturns). Whole
+ * milliturns are extracted trunc-towards-zero (symmetric in
+ * both directions) and the sub-milliturn remainder is kept, so
+ * many samples below one milliturn each still accumulate
+ * exactly, and rotation past a full turn never wraps: two
+ * turns read 2000 milliturns, not 0. All arithmetic is int64
+ * with bounded remainder; no angle is ever materialised.
+ * POD state: a cartridge may embed it (deriving dial effects
+ * from its feed in hashed state) or a runner may own it and
+ * queue the events to apply(). Feed it per-step chunks
+ * (<= TOY_SIG_MAX_SAMPLES_PER_STEP) so the returned delta fits
+ * the event's int32 v with enormous margin; larger calls are
+ * clamped on return while total_milliturns stays exact. */
+typedef struct {
+    int64_t accum_num;        /* sub-milliturn remainder numerator */
+    int64_t total_milliturns; /* signed total emitted so far     */
+    uint32_t scale_lsb_per_dps; /* info.scale2_num, e.g. 128       */
+    uint32_t sample_rate_hz;    /* info.sample_rate_hz             */
+} toy_dial_t;
+
+void toy_dial_reset(toy_dial_t *d, uint32_t scale_lsb_per_dps,
+                    uint32_t sample_rate_hz);
+void toy_dial_reset_for_info(toy_dial_t *d, const toy_sig_info_t *info);
+/* Integrate n_samples interleaved frames (channels must be the
+ * IMU6 layout, 6; anything else integrates nothing). Returns
+ * the whole-milliturn delta produced by THIS call. */
+int32_t toy_dial_feed(toy_dial_t *d, const int16_t *frames,
+                      uint32_t n_samples, uint32_t channels);
+/* Same, then fill *out as a zero-based TOY_EV_DIAL event
+ * (id 0 = the device itself, v = delta) iff delta != 0.
+ * Returns 1 when an event was produced, else 0. */
+int toy_dial_feed_event(toy_dial_t *d, const int16_t *frames,
+                        uint32_t n_samples, uint32_t channels,
+                        toy_event_t *out);
 
 /* --- deterministic primitives ----------------------------------- */
 

@@ -258,5 +258,5 @@ static void cloud_render(const void *st_, toy_fb_t *fb)
 const toy_cart_t toy_cart_cloud = {
     "cloud", "A Few Ulps of Weather",
     "12 figure-8s a few ulps apart, white is exact. Watch SEP grow.",
-    sizeof(cloud_state), 4, 1000, 250, cloud_reset, cloud_step, cloud_render, 0, 0, 0, 0, 0, 0, 0
+    sizeof(cloud_state), 4, 1000, 250, cloud_reset, cloud_step, cloud_render, 0, 0, 0, 0, 0, 0, 0, 0, { 0 }
 };

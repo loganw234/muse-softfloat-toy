@@ -14,6 +14,7 @@
 #include <stdint.h>
 #include "toy_fb.h"
 #include "toy_input.h"
+#include "toy_signal.h"
 
 /* Every host (emulator, board, WASM) allocates this much state.
  * A cartridge whose state exceeds it does not load anywhere. */
@@ -54,6 +55,28 @@ struct toy_cart_s {
      * is every current cartridge's layout version. Referenced by
      * name only, never by offset. */
     uint32_t state_version;
+    /* --- signal feed seam, APPENDED after state_version (SIG-1,
+     * docs/study-signals.md section 4) ---
+     * All zero/NULL for signal-deaf carts; existing positional
+     * initialisers zero-fill this tail, so deaf carts keep their
+     * source and proof hashes unchanged. feed() obeys the
+     * step()/apply() rules (integer/softfloat only, no alloc, no
+     * I/O, bounded, writes only its own state) and runs only at
+     * step boundaries: each step, the runner polls exactly
+     * sig_spec.samples_per_step frames and calls feed() FIRST,
+     * then applies that boundary's input events, then step() -
+     * feed delivers the samples the step consumes, apply() acts
+     * on that fresh sensor state (including dial events a runner
+     * derived from these very frames). There is no step-0 feed;
+     * the first feed precedes step 1. feed() copies values (and,
+     * via toy_sig_label_feed, stream kind + stream_id) into POD
+     * state; step() still reads no input. flags carries
+     * TOY_SIG_FLAG_* from the poll: proof runners fail loud on
+     * underrun and never call feed() with flags set. */
+    void (*feed)(void *st, const int16_t *samples, uint32_t n_samples,
+                 uint32_t channels, const toy_sig_info_t *info,
+                 uint32_t flags); /* or NULL */
+    toy_sig_spec_t sig_spec;      /* all zero = no signal need */
 };
 
 extern const toy_cart_t toy_cart_fig8;
@@ -215,6 +238,105 @@ static inline int toy_cart_check_input(const toy_cart_t *cart)
         if (in->ev.type == TOY_EV_SET_PARAM && in->ev.id >= cart->param_count)
             return 5;
     }
+    return 0;
+}
+
+/* --- shared signal feed helpers (study-signals section 4) ---
+ * One implementation for every runner, the feed analogue of the
+ * apply helpers above: runners keep owning their step loops and
+ * call toy_feed_step() FIRST at each boundary, then the apply
+ * helpers, then step(). Header-inline like them; the only new
+ * link dependency is core/toy_signal.c (host/WASM glob it, the
+ * board lists it deliberately). */
+
+/* Returns 0 if the descriptor's signal fields are consistent,
+ * else a small nonzero code: 1 spec without feed or feed
+ * without spec, 2 bad proof kind/scenario (v1: SYNTHETIC,
+ * scenario 1 only), 3 unknown device, 4 bad rate or
+ * samples-per-step. Runners call once at select/start, beside
+ * toy_cart_check_input. A signal-deaf cart passes trivially. */
+static inline int toy_cart_check_signal(const toy_cart_t *cart)
+{
+    const toy_sig_spec_t *spec = &cart->sig_spec;
+    int spec_set = spec->device != 0 || spec->proof_kind != 0 ||
+                   spec->scenario_id != 0 || spec->sample_rate_hz != 0 ||
+                   spec->samples_per_step != 0 || spec->seed != 0;
+    if (!cart->feed) return spec_set ? 1 : 0;
+    if (!spec_set) return 1;
+    if (spec->proof_kind != TOY_SIG_KIND_SYNTHETIC) return 2;
+    if (spec->scenario_id != 1u) return 2;
+    if (toy_sig_device_channels(spec->device) == 0u) return 3;
+    if (spec->sample_rate_hz == 0u) return 4;
+    if (spec->samples_per_step == 0u ||
+        spec->samples_per_step > TOY_SIG_MAX_SAMPLES_PER_STEP) return 4;
+    return 0;
+}
+
+/* Instantiate the PROOF source for a cart from its descriptor
+ * spec: the seeded synthetic stream named there, identical on
+ * host, board and WASM. Returns 1 if a source was created, 0
+ * for a signal-deaf cart (src untouched), -1 on a spec the
+ * synthetic generators cannot satisfy exactly.
+ * This is the single source-creation point a future live
+ * runner swaps: it constructs its LIVE (or REPLAY) source
+ * instead and the poll/feed loop below does not change. Only
+ * proof paths call this version, and proofs are synthetic. */
+static inline int toy_sig_proof_source_init(const toy_cart_t *cart,
+                                            toy_sig_source_t *src)
+{
+    const toy_sig_spec_t *spec = &cart->sig_spec;
+    if (!cart->feed) return 0;
+    if (toy_cart_check_signal(cart)) return -1;
+    if (spec->device == TOY_SIG_DEVICE_IMU6) {
+        toy_sig_source_synth_imu(src, spec->seed, spec->sample_rate_hz);
+    } else if (spec->device == TOY_SIG_DEVICE_MIC1) {
+        /* Scenario 1 (v1): fixed 440 Hz tone + hiss. */
+        toy_sig_source_synth_mic(src, spec->seed, spec->sample_rate_hz,
+                                 440000u, 440000u, 0);
+    } else {
+        return -1;
+    }
+    if (src->info.kind != spec->proof_kind ||
+        src->info.device != spec->device ||
+        src->info.scenario_id != spec->scenario_id ||
+        src->info.seed != spec->seed ||
+        src->info.sample_rate_hz != spec->sample_rate_hz ||
+        src->info.channels != toy_sig_device_channels(spec->device))
+        return -1;
+    return 1;
+}
+
+/* Feed one step's frames: poll exactly sig_spec.samples_per_step
+ * samples into the runner-owned frame buffer (at most
+ * TOY_SIG_MAX_FRAME_VALUES int16) and hand them to feed()
+ * BEFORE apply()/step() at this boundary. Samples are
+ * index-derived, never clock-derived: the i-th sample of step
+ * s is (s-1)*samples_per_step + i by construction.
+ * Returns 0 on success - including the signal-deaf no-op, the
+ * zero-churn fast path - else nonzero and feed() was NOT
+ * called: 1 source missing or mismatched with the spec, 2
+ * underrun/end (study rule 4: a proof run fails loud, samples
+ * are never zero-filled or repeated into a proof), 3 frame
+ * buffer too small. Proof runners abort the run on nonzero; a
+ * future live runner feeds gaps itself and does not use this
+ * proof-strict helper for them. */
+static inline int toy_feed_step(const toy_cart_t *cart, void *st,
+                                toy_sig_source_t *src,
+                                int16_t *frame, uint32_t frame_cap_values)
+{
+    const toy_sig_spec_t *spec = &cart->sig_spec;
+    uint32_t channels, flags = 0, got;
+    if (!cart->feed) return 0;
+    if (!src || !frame) return 1;
+    channels = toy_sig_device_channels(spec->device);
+    if (channels == 0u || src->info.device != spec->device ||
+        src->info.channels != channels ||
+        src->info.sample_rate_hz != spec->sample_rate_hz) return 1;
+    if ((uint64_t)spec->samples_per_step * channels >
+        (uint64_t)frame_cap_values) return 3;
+    got = toy_sig_poll(src, 0, 0, frame, spec->samples_per_step, &flags);
+    if (got != spec->samples_per_step || flags != 0u) return 2;
+    cart->feed(st, frame, got, channels, &src->info, flags);
     return 0;
 }
 
