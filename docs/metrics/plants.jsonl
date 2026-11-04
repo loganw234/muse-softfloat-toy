@@ -13,3 +13,4 @@
 {"parcel": "toy1-pendwave", "parcel_commit": "7cf8fefc24b0644b967f3e211e061d1ec66a14af", "copy_head": "76bf26f3ce40fd3ecee00b2e7d1a1a4e7dadbd34", "plants": 5, "key_sha256": "24d6f95ccaaf2fcbecefb9d50a72f64b646c8dee1da1215552ad88c3543fe39a", "checked_by": "lead-merge", "status": "dispatched"}
 {"parcel": "toy1-pendwave", "status": "verdict", "caught": 5, "plants": 5, "extra_findings": [], "verifier_report": "scratch/toy1/verify-pendwave.md", "checked_by": "lead-merge"}
 {"parcel": "toy1-orrery", "parcel_commit": "59651e3bd2fa661d1e0775239a7471e88725e0d3", "copy_head": "8713bbf9df8601aeafd8efe88df84034681b1c0c", "plants": 5, "key_sha256": "e9ff159c4b95b10ca3ce2657f53fd2c1325a8bdeb80419c6ef7f721e86db47ab", "checked_by": "lead-merge", "status": "dispatched"}
+{"parcel": "toy1-orrery", "status": "verdict", "caught": 5, "plants": 5, "extra_findings": [], "verifier_report": "scratch/toy1/verify-orrery.md", "checked_by": "lead-merge"}
