@@ -40,8 +40,8 @@
  *       final "END <total_steps>") from reset, with the cart's
  *       proof signal source and proof script running exactly as
  *       in `proof` mode - the native re-proof of a browser
- *       session. An event's step is the wasm runner's step
- *       counter at the boundary it drained (see run_session).
+ *       session. An event's step is the 1-based proof-step
+ *       number it applied before (see run_session).
  */
 #include <errno.h>
 #include <stdio.h>
@@ -142,26 +142,26 @@ static void print_run_line(const toy_cart_t *cart, const toy_sig_source_t *src)
  *    cap TOY_MAX_EVENTS_PER_STEP minus the proof entries just
  *    applied (proof first, excess live events carry in order),
  *    then step(), then counter++.
- * A logged session step S is that counter value at its
- * boundary - S == 0 is the first sub-step, whose emu proof
- * step number (as in `proof`/`run`, 1-based) is S + 1. So the
- * replay loop below is the proof loop with, at emu step s,
- * the session events for S = s - 1 pushed into a real
- * toy_queue_t (file order, so enqueue coalescing/drops and
- * drain carry are the queue's own) before feed -> proof ->
- * drain -> step. Pushing all of step S's events just before
- * that boundary is exact: in the browser they were queued
- * while the counter read S, after the previous boundary's
- * drain and before this one, and nothing else reads the
- * queue in between.
+ * A logged session step S is the 1-based proof-step number
+ * (as in `proof`/`run`) of the sub-step it drained before:
+ * the browser exporter stamps toy_steps_done + 1 at drain
+ * (docs/CARTRIDGES.md "Web mock device" is normative). So
+ * the replay loop below is the proof loop with, at emu step
+ * s = done + 1, the session events stamped s pushed into a
+ * real toy_queue_t (file order, so enqueue coalescing/drops
+ * and drain carry are the queue's own) before feed -> proof
+ * -> drain -> step. Pushing all of step s's events just
+ * before that boundary is exact: in the browser they were
+ * queued while the counter read s - 1, after the previous
+ * boundary's drain and before this one, and nothing else
+ * reads the queue in between.
  *
- * Events with step >= END total are rejected: the drain that
- * applies counter==total events only runs inside a further
- * sub-step, which would also step the cart past total, so a
- * well-formed log exported at `total` cannot contain an
- * event applied at (or after) total. Likewise events still
- * queued (cap-carried) after the final step were never
- * applied in the session and reject rather than guess.
+ * Valid stamps are 1..END total: stamp 0 has no boundary
+ * (the step-0 slot is proof setup only, no live drain) and
+ * stamps past total would drain only in a further sub-step
+ * past the exported end. Likewise events still queued
+ * (cap-carried) after the final step were never applied in
+ * the session and reject rather than guess.
  *
  * The whole file is parsed and validated strictly BEFORE
  * the cart is touched, so a malformed log prints no hash
@@ -355,13 +355,12 @@ static int run_session(const char *path)
         fprintf(stderr, "session %s: missing END line\n", path);
         free(evs); return 2;
     }
-    if (n && (uint64_t)evs[n - 1].step >= total) {
+    if (n && (evs[0].step < 1 || (uint64_t)evs[n - 1].step > total)) {
         fprintf(stderr,
-                "session %s: event step %u >= END total %llu (events at"
-                " the final counter drain only in a further step, so a"
-                " log exported at %llu cannot contain one)\n",
-                path, evs[n - 1].step, (unsigned long long)total,
-                (unsigned long long)total);
+                "session %s: event steps must be in 1..END total %llu"
+                " (1-based proof-step stamps; got first %u last %u)\n",
+                path, (unsigned long long)total,
+                evs[0].step, evs[n - 1].step);
         free(evs); return 2;
     }
     toy_sig_source_t *sig = sig_setup(cart);
@@ -375,7 +374,7 @@ static int run_session(const char *path)
     size_t idx = 0;
     uint64_t applied = 0;
     for (uint64_t done = 0; done < total; done++) {
-        while (idx < n && (uint64_t)evs[idx].step == done) {
+        while (idx < n && (uint64_t)evs[idx].step == done + 1) {
             toy_queue_push(&live, &evs[idx].ev);
             idx++;
         }
