@@ -33,7 +33,17 @@
  *       offset, local minute-of-day, monotonic ms, and whether
  *       the default schedule considers now active. Setting the
  *       clock never changes any hash (tools/clock_test.c).
+ *   toy_emu session <file>
+ *       Replay a TOYSESSION1 interaction log exported by the web
+ *       mock device ("TOYSESSION1 cart=<name>", one
+ *       "<step> <type> <id> <x> <y> <v> <bits>" event per line,
+ *       final "END <total_steps>") from reset, with the cart's
+ *       proof signal source and proof script running exactly as
+ *       in `proof` mode - the native re-proof of a browser
+ *       session. An event's step is the wasm runner's step
+ *       counter at the boundary it drained (see run_session).
  */
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -120,6 +130,279 @@ static void print_run_line(const toy_cart_t *cart, const toy_sig_source_t *src)
                src->info.sample_rate_hz, cart->sig_spec.samples_per_step,
                (unsigned long long)src->info.stream_id);
     printf("\n");
+}
+
+/* --- TOYSESSION1 replay (`session` mode) ---
+ * Step semantics mirror site/wasm_glue.c toy_wasm_step (lines
+ * 111-129) and toy_wasm_select (93-109) exactly:
+ *  - select: reset, step counter = 0, queue cleared, proof
+ *    entries for step 0 applied (no feed);
+ *  - each sub-step: feed FIRST, then proof entries due at
+ *    (counter + 1), then the live queue drains with the shared
+ *    cap TOY_MAX_EVENTS_PER_STEP minus the proof entries just
+ *    applied (proof first, excess live events carry in order),
+ *    then step(), then counter++.
+ * A logged session step S is that counter value at its
+ * boundary - S == 0 is the first sub-step, whose emu proof
+ * step number (as in `proof`/`run`, 1-based) is S + 1. So the
+ * replay loop below is the proof loop with, at emu step s,
+ * the session events for S = s - 1 pushed into a real
+ * toy_queue_t (file order, so enqueue coalescing/drops and
+ * drain carry are the queue's own) before feed -> proof ->
+ * drain -> step. Pushing all of step S's events just before
+ * that boundary is exact: in the browser they were queued
+ * while the counter read S, after the previous boundary's
+ * drain and before this one, and nothing else reads the
+ * queue in between.
+ *
+ * Events with step >= END total are rejected: the drain that
+ * applies counter==total events only runs inside a further
+ * sub-step, which would also step the cart past total, so a
+ * well-formed log exported at `total` cannot contain an
+ * event applied at (or after) total. Likewise events still
+ * queued (cap-carried) after the final step were never
+ * applied in the session and reject rather than guess.
+ *
+ * The whole file is parsed and validated strictly BEFORE
+ * the cart is touched, so a malformed log prints no hash
+ * lines: exact header with a resolvable cart, exactly seven
+ * decimal fields per event, nondecreasing steps, event type
+ * in range and inside the cart's caps as the wasm queue push
+ * gates them (deaf cart, missing cap, SET_PARAM id out of
+ * range all reject), a final END line, and nothing after it.
+ * Every rejection is a stderr message and exit 2, like the
+ * other modes. */
+static int sess_parse_i64(const char *tok, int64_t *out)
+{
+    if (!tok || !tok[0]) return -1;
+    errno = 0;
+    char *end = NULL;
+    long long v = strtoll(tok, &end, 10);
+    if (errno || end == tok || *end) return -1;
+    *out = (int64_t)v;
+    return 0;
+}
+
+static int sess_parse_u64(const char *tok, uint64_t *out)
+{
+    if (!tok || !tok[0] || tok[0] == '-') return -1;
+    errno = 0;
+    char *end = NULL;
+    unsigned long long v = strtoull(tok, &end, 10);
+    if (errno || end == tok || *end) return -1;
+    *out = (uint64_t)v;
+    return 0;
+}
+
+/* Split a line into whitespace tokens in place. Returns the
+ * token count, or max+1 if there are more than max. */
+static int sess_tokens(char *line, char **toks, int max)
+{
+    int n = 0;
+    char *t = strtok(line, " \t");
+    while (t) {
+        if (n >= max) return max + 1;
+        toks[n++] = t;
+        t = strtok(NULL, " \t");
+    }
+    return n;
+}
+
+static int run_session(const char *path)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f) { fprintf(stderr, "cannot read %s\n", path); return 2; }
+    const toy_cart_t *cart = NULL;
+    toy_proof_input_t *evs = NULL; /* same {step, ev} shape */
+    size_t n = 0, capn = 0;
+    uint64_t total = 0;
+    int have_end = 0;
+    int64_t prev_step = -1;
+    long lineno = 0;
+    char line[1024];
+    while (fgets(line, sizeof line, f)) {
+        lineno++;
+        size_t len = strlen(line);
+        if (len && line[len - 1] != '\n' && !feof(f)) {
+            fprintf(stderr, "session %s:%ld: line too long\n", path, lineno);
+            fclose(f); free(evs); return 2;
+        }
+        while (len && (line[len - 1] == '\n' || line[len - 1] == '\r'))
+            line[--len] = '\0';
+        if (have_end) {
+            fprintf(stderr, "session %s:%ld: trailing content after END\n",
+                    path, lineno);
+            fclose(f); free(evs); return 2;
+        }
+        char *toks[9];
+        int nt = sess_tokens(line, toks, 9);
+        if (!cart) {
+            if (nt != 2 || strcmp(toks[0], "TOYSESSION1") != 0 ||
+                strncmp(toks[1], "cart=", 5) != 0 || !toks[1][5]) {
+                fprintf(stderr,
+                        "session %s:%ld: bad header (want"
+                        " TOYSESSION1 cart=<name>)\n", path, lineno);
+                fclose(f); return 2;
+            }
+            cart = toy_cart_by_name(toks[1] + 5);
+            if (!cart) {
+                fprintf(stderr, "unknown cart %s\n", toks[1] + 5);
+                fclose(f); return 2;
+            }
+            check_cart_input(cart);
+            continue;
+        }
+        if (nt == 2 && strcmp(toks[0], "END") == 0) {
+            if (sess_parse_u64(toks[1], &total) != 0 ||
+                total > 0xffffffffull) {
+                fprintf(stderr, "session %s:%ld: bad END total\n",
+                        path, lineno);
+                fclose(f); free(evs); return 2;
+            }
+            have_end = 1;
+            continue;
+        }
+        int64_t step, type, id, x, y, v;
+        uint64_t bits;
+        if (nt != 7 ||
+            sess_parse_i64(toks[0], &step) != 0 ||
+            sess_parse_i64(toks[1], &type) != 0 ||
+            sess_parse_i64(toks[2], &id) != 0 ||
+            sess_parse_i64(toks[3], &x) != 0 ||
+            sess_parse_i64(toks[4], &y) != 0 ||
+            sess_parse_i64(toks[5], &v) != 0 ||
+            sess_parse_u64(toks[6], &bits) != 0) {
+            fprintf(stderr,
+                    "session %s:%ld: malformed event line (want"
+                    " <step> <type> <id> <x> <y> <v> <bits>)\n",
+                    path, lineno);
+            fclose(f); free(evs); return 2;
+        }
+        if (step < 0 || step > 0xffffffffll) {
+            fprintf(stderr, "session %s:%ld: step out of range\n",
+                    path, lineno);
+            fclose(f); free(evs); return 2;
+        }
+        if (step < prev_step) {
+            fprintf(stderr, "session %s:%ld: decreasing step\n",
+                    path, lineno);
+            fclose(f); free(evs); return 2;
+        }
+        prev_step = step;
+        if (type < 1 || type > TOY_EV_MAX_KNOWN) {
+            fprintf(stderr, "session %s:%ld: event type out of range\n",
+                    path, lineno);
+            fclose(f); free(evs); return 2;
+        }
+        if (id < 0 || id > 0xffffffffll ||
+            x < INT32_MIN || x > INT32_MAX ||
+            y < INT32_MIN || y > INT32_MAX ||
+            v < INT32_MIN || v > INT32_MAX) {
+            fprintf(stderr, "session %s:%ld: event field out of range\n",
+                    path, lineno);
+            fclose(f); free(evs); return 2;
+        }
+        if (!cart->apply) {
+            fprintf(stderr,
+                    "session %s:%ld: event for deaf cart %s (no apply)\n",
+                    path, lineno, cart->name);
+            fclose(f); free(evs); return 2;
+        }
+        uint32_t need = toy_event_cap_mask((uint32_t)type);
+        if (need && (cart->input_caps & need) == 0) {
+            fprintf(stderr,
+                    "session %s:%ld: event type %lld not in caps of %s\n",
+                    path, lineno, (long long)type, cart->name);
+            fclose(f); free(evs); return 2;
+        }
+        if (type == TOY_EV_SET_PARAM && (uint64_t)id >= cart->param_count) {
+            fprintf(stderr,
+                    "session %s:%ld: SET_PARAM id out of range for %s\n",
+                    path, lineno, cart->name);
+            fclose(f); free(evs); return 2;
+        }
+        if (n == capn) {
+            size_t want = capn ? capn * 2 : 64;
+            toy_proof_input_t *grown =
+                (toy_proof_input_t *)realloc(evs, want * sizeof *evs);
+            if (!grown) {
+                fprintf(stderr, "oom\n");
+                fclose(f); free(evs); return 2;
+            }
+            evs = grown;
+            capn = want;
+        }
+        evs[n].step = (uint32_t)step;
+        memset(&evs[n].ev, 0, sizeof evs[n].ev);
+        evs[n].ev.type = (uint32_t)type;
+        evs[n].ev.id = (uint32_t)id;
+        evs[n].ev.x = (int32_t)x;
+        evs[n].ev.y = (int32_t)y;
+        evs[n].ev.v = (int32_t)v;
+        evs[n].ev.bits = bits;
+        n++;
+    }
+    if (ferror(f)) {
+        fprintf(stderr, "cannot read %s\n", path);
+        fclose(f); free(evs); return 2;
+    }
+    fclose(f);
+    if (!cart) {
+        fprintf(stderr, "session %s: bad header (empty file)\n", path);
+        return 2;
+    }
+    if (!have_end) {
+        fprintf(stderr, "session %s: missing END line\n", path);
+        free(evs); return 2;
+    }
+    if (n && (uint64_t)evs[n - 1].step >= total) {
+        fprintf(stderr,
+                "session %s: event step %u >= END total %llu (events at"
+                " the final counter drain only in a further step, so a"
+                " log exported at %llu cannot contain one)\n",
+                path, evs[n - 1].step, (unsigned long long)total,
+                (unsigned long long)total);
+        free(evs); return 2;
+    }
+    toy_sig_source_t *sig = sig_setup(cart);
+    void *st = xcalloc(cart->state_size);
+    cart->reset(st);
+    uint32_t cur = 0;
+    toy_apply_proof_at(cart, st, 0, &cur); /* step-0 setup; no feed */
+    toy_queue_t live;
+    toy_queue_clear(&live);
+    print_run_line(cart, sig);
+    size_t idx = 0;
+    uint64_t applied = 0;
+    for (uint64_t done = 0; done < total; done++) {
+        while (idx < n && (uint64_t)evs[idx].step == done) {
+            toy_queue_push(&live, &evs[idx].ev);
+            idx++;
+        }
+        sig_feed_or_die(cart, st, sig); /* feed -> proof -> drain -> step */
+        uint32_t before = cur;
+        toy_apply_proof_at(cart, st, (uint32_t)(done + 1), &cur);
+        applied += toy_apply_queue(cart, st, &live,
+                                    TOY_MAX_EVENTS_PER_STEP - (cur - before));
+        cart->step(st);
+    }
+    if (live.len) {
+        fprintf(stderr,
+                "session %s: %u event(s) still queued after END %llu"
+                " (cap carry past the final step: never applied in"
+                " the session)\n",
+                path, live.len, (unsigned long long)total);
+        free(evs); return 2;
+    }
+    uint64_t h = toy_hash_state(st, cart->state_size);
+    printf("step %llu hash %016llx\n", (unsigned long long)total,
+           (unsigned long long)h);
+    printf("TOY-SESSION events %zu applied %llu\n", n,
+           (unsigned long long)applied);
+    printf("TOY-DONE steps %llu hash %016llx\n",
+           (unsigned long long)total, (unsigned long long)h);
+    free(evs);
+    return 0;
 }
 
 static int write_ppm(const char *path, const toy_fb_t *fb)
@@ -569,6 +852,8 @@ int main(int argc, char **argv)
         print_morning_report(&rep);
         return 0;
     }
+    if (argc >= 2 && strcmp(argv[1], "session") == 0 && argc == 3)
+        return run_session(argv[2]);
     fprintf(stderr,
         "usage:\n"
         "  toy_emu list\n"
@@ -580,6 +865,7 @@ int main(int argc, char **argv)
         "  toy_emu bank <cart> <steps> <keyframe-every> [file]\n"
         "  toy_emu replay <file>\n"
         "  toy_emu report <file>\n"
+        "  toy_emu session <file>\n"
         "  toy_emu clock\n"
         "carts:");
     for (int i = 0; i < toy_cart_count; i++) fprintf(stderr, " %s", toy_carts[i]->name);
