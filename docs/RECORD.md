@@ -66,3 +66,10 @@ portability fixes landed on the way: CR stripping in the
 cart-list loops and a CR-insensitive final diff in the board
 gate — both found by Wave T1 parcels/verifiers, both now in
 the stock scripts.
+
+`stagnation` landed the same day: planted verification 5/5,
+then check/WASM/board PASS on merged main with hashes pinned
+from the lead run (identical to the parcel report). The
+binary16/32/64 lanes freeze at 257/1025/2049 exactly as
+predicted analytically; the augmented-addition lane's exact
+total at proof end is 2^53 + 1952, on the Pico as on the host.
