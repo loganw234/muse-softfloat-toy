@@ -50,3 +50,19 @@ built and verified the WASM successfully but stopped at Pages
 configuration until Pages was explicitly enabled for Actions;
 the rerun deployed and the live deep-linked pendulum state at
 step 3600 rendered with the expected hash on both displays.
+
+## 2026-11-04 - Wave T1 merges begin: carousel
+
+First Wave T1 landing. `carousel` (figure-8, Lagrange
+equilateral, Euler collinear; one Yoshida-4 integrator,
+auto-advancing every two periods) merged after planted-copy
+verification scored 5/5 (`docs/metrics/plants.jsonl` — this
+repo's own plant ledger, started today). Lead gates on merged
+main: `tools/run.sh check` PASS, WASM checker PASS (carousel
+pinned at all 8 proof report points from the lead's native
+run), board budget PASS with host == board at every reported
+step on the genuine Pico (E66440A2CB6F5C2B). Two Windows-host
+portability fixes landed on the way: CR stripping in the
+cart-list loops and a CR-insensitive final diff in the board
+gate — both found by Wave T1 parcels/verifiers, both now in
+the stock scripts.
