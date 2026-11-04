@@ -31,6 +31,7 @@ add_executable(toy_board
     clock_board.c
     ${TOY_ROOT}/core/toy_fb.c
     ${TOY_ROOT}/core/toy_carts.c
+    ${TOY_ROOT}/core/toy_input.c
     ${TOY_ROOT}/core/cart_fig8.c
     ${TOY_ROOT}/core/cart_pendulum.c
     ${TOY_ROOT}/core/cart_carousel.c
@@ -46,7 +47,7 @@ add_executable(toy_board
     ${TOY_ROOT}/core/toy_fft.c
     ${TOY_ROOT}/core/toy_signal.c
     ${TOY_ROOT}/core/cart_orbitspec.c
-    ${TOY_ROOT}/core/cart_julia.c ${TOY_ROOT}/core/toy_input.c
+    ${TOY_ROOT}/core/cart_julia.c
     ${LIB_SRC}
 )
 target_include_directories(toy_board PRIVATE ${LIB}/include ${TOY_ROOT}/core)

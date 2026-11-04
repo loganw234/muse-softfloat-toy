@@ -464,7 +464,7 @@ const toy_cart_t toy_cart_julia = {
     julia_reset, julia_step, julia_render,
     /* explicit WAVE-T2 tail: apply, params, param_count,
      * proof_inputs, proof_input_count, input_caps,
-     * state_version */
+     * state_version, feed, sig_spec (signal-deaf) */
     julia_apply, julia_params, 2, julia_proof, 5,
-    TOY_CAP_POINTER | TOY_CAP_PARAMS, 0
+    TOY_CAP_POINTER | TOY_CAP_PARAMS, 0, 0, { 0 }
 };
