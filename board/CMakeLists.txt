@@ -50,6 +50,7 @@ add_executable(toy_board
     ${TOY_ROOT}/core/cart_julia.c
     ${TOY_ROOT}/core/cart_gravity.c
     ${TOY_ROOT}/core/cart_gpend.c
+    ${TOY_ROOT}/core/cart_seismo.c
     ${LIB_SRC}
 )
 target_include_directories(toy_board PRIVATE ${LIB}/include ${TOY_ROOT}/core)
