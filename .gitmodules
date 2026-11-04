@@ -1,0 +1,3 @@
+[submodule "libs/muse-softfloat"]
+	path = libs/muse-softfloat
+	url = https://github.com/loganw234/muse-softfloat.git
