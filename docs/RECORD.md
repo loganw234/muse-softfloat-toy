@@ -197,3 +197,17 @@ body-0 radius — coherently sampled, dominant bin 17 with the
 harmonic ladder, confirmed against an independent pipeline —
 and is the first cartridge to run `toy_fft` on the Pico
 firmware itself.
+
+The input/settings seam and checkpoint core then landed
+(each planted-verified 5/5): optional pre-step `apply()` via
+six appended descriptor fields, 32-byte integer events
+(incl. the dial event) quantised to step boundaries,
+`SET_PARAM` settings, compiled-in proof scripts replayed
+identically by emu, board and WASM; and TOYCKPT1
+checkpointing (64-byte header, CRC-32 + FNV identity,
+`state_version` appended last, emu save/load with proven
+resume continuity). One combined board gate covers both
+merges: check, WASM, and board budgets all PASS with every
+pre-seam proof hash unchanged — the seams cost existing
+cartridges nothing. Descriptor tails are now spelled out
+explicitly in all thirteen cartridges.
