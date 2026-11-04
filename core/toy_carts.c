@@ -13,6 +13,7 @@ const toy_cart_t *const toy_carts[] = {
     &toy_cart_intervallens,
     &toy_cart_pendwave,
     &toy_cart_orrery,
+    &toy_cart_cloud,
 };
 const int toy_cart_count = (int)(sizeof toy_carts / sizeof toy_carts[0]);
 

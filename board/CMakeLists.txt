@@ -40,6 +40,7 @@ add_executable(toy_board
     ${TOY_ROOT}/core/cart_intervallens.c
     ${TOY_ROOT}/core/cart_pendwave.c
     ${TOY_ROOT}/core/cart_orrery.c
+    ${TOY_ROOT}/core/cart_cloud.c
     ${LIB_SRC}
 )
 target_include_directories(toy_board PRIVATE ${LIB}/include ${TOY_ROOT}/core)
