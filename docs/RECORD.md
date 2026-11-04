@@ -252,5 +252,7 @@ proof cc3111b9). sigcore_test registry assertion was
 generalized to a feed-cart allowlist after going stale
 twice on registry growth. All lead gates PASS on merged
 main (sigcore/ckpt tests, check, WASM with all three new
-carts pinned from lead reruns); the 17-cartridge board
-gate is the remaining on-device proof for this batch.
+carts pinned from lead reruns), and the 17-cartridge board
+gate PASSes host == board at every reported step - gpend
+and seismo generate their synthetic proof streams on the
+Pico itself with host-identical stream identity.
