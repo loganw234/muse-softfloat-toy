@@ -211,3 +211,7 @@ merges: check, WASM, and board budgets all PASS with every
 pre-seam proof hash unchanged — the seams cost existing
 cartridges nothing. Descriptor tails are now spelled out
 explicitly in all thirteen cartridges.
+
+Repository made public today at the owner's election (MIT
+unchanged); earlier entries describing it as private are the
+historical record of how it started.

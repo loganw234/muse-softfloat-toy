@@ -125,8 +125,8 @@ build that drifts from the hardware maths fails before it deploys.
 
 ## 6. Licensing posture
 
-- This repo: MIT, Copyright (c) 2026 Logan W. (to settle at first
-  release; private during development).
+- This repo: MIT, Copyright (c) 2026 Logan W. (settled; made
+  public 2026-11-04).
 - muse-softfloat submodule: MIT, pinned at the sealed tag.
 - No REBOUND code: integrators here are textbook compositions
   (leapfrog/Yoshida, RK4) written for this repo; REBOUND remains an

@@ -1,13 +1,16 @@
 # muse-softfloat-toy
 
 A deterministic desk toy: a gallery of exact simulations (orbits,
-chaos, precision demos) running on an RP2040 round-touch board,
-every state re-derivable bit-for-bit on a desktop. Built on
+chaos, precision demos) for a round-touch board (RP2350 target;
+proven today on RP2040), every state re-derivable bit-for-bit on
+a desktop. Built on
 [muse-softfloat](https://github.com/loganw234/muse-softfloat)
 (vendored as a pinned submodule at its sealed `v1.0.0` tag), whose
 binary64 arithmetic is the simulation engine for every cartridge.
+Thirteen cartridges so far, each proven host == board == browser.
 
-Private during development. The design of record is
+Public, MIT-licensed (see [LICENSE](LICENSE)). The design of
+record is
 [docs/TOY-0.md](docs/TOY-0.md); new simulations follow
 [docs/CARTRIDGES.md](docs/CARTRIDGES.md); the dated project record
 is [docs/RECORD.md](docs/RECORD.md).
