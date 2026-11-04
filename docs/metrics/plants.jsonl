@@ -23,3 +23,4 @@
 {"parcel": "toy1-signals", "parcel_commit": "22bbdd788247f8df42b5f717db580d60e95da352", "copy_head": "0b2bbbd55e83ab1024ce3532cbba1769c710c6a7", "plants": 5, "key_sha256": "ae943b1b7c1b4c7abb447728c7d31ec5cda7af39df74cdb080f648d2d740876f", "checked_by": "lead-merge", "status": "dispatched"}
 {"parcel": "toy1-signals", "status": "verdict", "caught": 5, "plants": 5, "extra_findings": [], "verifier_report": "scratch/toy1/verify-signals.md", "checked_by": "lead-merge"}
 {"parcel": "toy1-fft", "parcel_commit": "7d550a3cb68d9a07671f45602600cb98cea065af", "copy_head": "176e64384b387f6f170137007678938832c1d9a9", "plants": 5, "key_sha256": "ee146c58df699efdaafac12e3111530d0684765a9a683ff36be4d33a4a21063e", "checked_by": "lead-merge", "status": "dispatched"}
+{"parcel": "toy1-fft", "status": "verdict", "caught": 5, "plants": 5, "extra_findings": [], "verifier_report": "scratch/toy1/verify-fft.md", "checked_by": "lead-merge"}
