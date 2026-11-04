@@ -17,6 +17,34 @@ for (const d of displays) {
   d.image = d.ctx.createImageData(d.size, d.size);
 }
 
+/* Time layer (glue only; banking UI is a later parcel): JS owns
+ * the runner clock and feeds WASM through env imports. It starts
+ * UNSET - a first-class state; "Set clock" adopts the browser's
+ * current time + zone offset as the manual set. The sim never
+ * reads it: pacing below stays stepDebt -> integer step counts. */
+const clockState = { valid: false, tzMin: -new Date().getTimezoneOffset() };
+const clockEl = $("clock");
+function clockUtcSeconds() {
+  return clockState.valid ? Math.floor(Date.now() / 1000) : 0;
+}
+function refreshClockLabel() {
+  if (!clockState.valid) { clockEl.textContent = "clock unset"; return; }
+  // Read back through C when the glue exports are present.
+  let secs = clockUtcSeconds();
+  if (wasm && typeof wasm.toy_wasm_clock_utc_lo === "function" &&
+      wasm.toy_wasm_clock_valid()) {
+    secs = Number((BigInt(wasm.toy_wasm_clock_utc_hi() >>> 0) << 32n) |
+                  BigInt(wasm.toy_wasm_clock_utc_lo() >>> 0));
+  }
+  clockEl.textContent =
+    `clock ${new Date(secs * 1000).toLocaleTimeString()} (UTC${clockState.tzMin >= 0 ? "+" : ""}${clockState.tzMin}m)`;
+}
+$("set-clock").addEventListener("click", () => {
+  clockState.valid = true;
+  clockState.tzMin = -new Date().getTimezoneOffset();
+  refreshClockLabel();
+});
+
 let wasm = null;
 let selected = 0;
 let playing = true;
@@ -125,6 +153,7 @@ function tick(now) {
     }
     framesThisSecond = 0;
     lastRenderSecond = second;
+    refreshClockLabel();
   }
 }
 
@@ -133,7 +162,16 @@ async function init() {
     const response = await fetch("toy.wasm");
     if (!response.ok) throw new Error(`toy.wasm HTTP ${response.status}`);
     const bytes = await response.arrayBuffer();
-    const { instance } = await WebAssembly.instantiate(bytes, {});
+    const { instance } = await WebAssembly.instantiate(bytes, {
+      env: {
+        toy_js_clock_valid: () => (clockState.valid ? 1 : 0),
+        toy_js_clock_tz_min: () => clockState.tzMin | 0,
+        toy_js_clock_utc_lo: () => clockUtcSeconds() >>> 0,
+        toy_js_clock_utc_hi: () => Math.floor(clockUtcSeconds() / 4294967296) >>> 0,
+        toy_js_mono_lo: () => Math.floor(performance.now()) >>> 0,
+        toy_js_mono_hi: () => Math.floor(performance.now() / 4294967296) >>> 0,
+      },
+    });
     wasm = instance.exports;
 
     for (let i = 0; i < wasm.toy_wasm_count(); i++) {

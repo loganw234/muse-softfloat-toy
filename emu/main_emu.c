@@ -14,12 +14,36 @@
  *       Step numbers and hash lines continue the uninterrupted
  *       `run` stream: save at N then load for M prints the tail
  *       of `run <cart> <N+M>`.
+ *   toy_emu bank <cart> <steps> <keyframe-every> [file]
+ *       Time layer: step <steps> from reset storing sparse
+ *       TOYBANK1 keyframes every <keyframe-every> steps (0 =
+ *       start+final only) to [file] (default <cart>.bank).
+ *       Wall labels come from the runner clock (emu/clock_emu.c,
+ *       env TOY_CLOCK_UTC_SECONDS); unset banks fine, unlabelled.
+ *   toy_emu replay <file>
+ *       Re-step between keyframes VERIFYING every keyframe hash
+ *       (core/toy_bank.h) - the bit-identical playback proof -
+ *       then print the morning report as verified. Fails loudly
+ *       on the first mismatched keyframe.
+ *   toy_emu report <file>
+ *       Print the morning report v1 for a bank file (no replay;
+ *       playback_verified=0).
+ *   toy_emu clock
+ *       Print the runner clock: valid/unset, UTC seconds, zone
+ *       offset, local minute-of-day, monotonic ms, and whether
+ *       the default schedule considers now active. Setting the
+ *       clock never changes any hash (tools/clock_test.c).
  */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "toy_cart.h"
 #include "toy_ckpt.h"
+#include "toy_bank.h"
+/* Runner-side only (see core/toy_clock.h): the emu may read
+ * wall time for bank labels/scheduling; cartridges never can. */
+#define TOY_CLOCK_ALLOW 1
+#include "toy_clock.h"
 
 static void *xcalloc(size_t n)
 {
@@ -155,6 +179,62 @@ static int read_file(const char *path, unsigned char *buf, size_t cap, size_t *l
     if (bad) return -1;
     *len = n;
     return 0;
+}
+
+/* Read a whole bank file (budget-bounded). One byte past the
+ * budget is read so an oversized file reports at its true size
+ * class and parse rejects it, rather than truncating. */
+static unsigned char *read_bank_file(const char *path, size_t *len_out)
+{
+    size_t cap = (size_t)TOY_BANK_BUDGET_BYTES + 1u;
+    unsigned char *buf = (unsigned char *)xcalloc(cap);
+    FILE *f = fopen(path, "rb");
+    if (!f) { free(buf); return NULL; }
+    size_t n = fread(buf, 1, cap, f);
+    int bad = ferror(f);
+    fclose(f);
+    if (bad) { free(buf); return NULL; }
+    *len_out = n;
+    return buf;
+}
+
+/* Morning report v1, text form (study-timebank section 5.2).
+ * Wall time prints as raw UTC seconds + local HH:MM derived by
+ * integer minute-of-day; calendar rendering is presentation
+ * (device UI / JS Date), and an unset clock prints as unset -
+ * never an invented time. */
+static void print_morning_report(const toy_morning_report_t *r)
+{
+    printf("TOY-MORNING-REPORT v1\n");
+    printf("cart %s\n", r->cart_name);
+    printf("steps %llu -> %llu (banked %llu)\n",
+           (unsigned long long)r->steps_at_start,
+           (unsigned long long)r->steps_at_end,
+           (unsigned long long)r->steps_banked);
+    if (r->wall_valid)
+        printf("steps_expected_1x %llu\n",
+               (unsigned long long)r->steps_expected_1x);
+    else
+        printf("steps_expected_1x n/a (clock unset)\n");
+    printf("keyframes %u every %u steps\n", r->keyframe_count,
+           r->keyframe_every);
+    printf("hash_start %016llx\n", (unsigned long long)r->hash_start);
+    printf("hash_end %016llx\n", (unsigned long long)r->hash_end);
+    if (r->wall_valid) {
+        toy_time_t ws = { r->wall_start_s, r->tz_offset_min, true };
+        toy_time_t we = { r->wall_end_s, r->tz_offset_min, true };
+        unsigned ms = toy_clock_minutes_of_day(ws);
+        unsigned me = toy_clock_minutes_of_day(we);
+        printf("wall utc %lld -> %lld (span %lld s, tz %+d min, local %02u:%02u -> %02u:%02u)\n",
+               (long long)r->wall_start_s, (long long)r->wall_end_s,
+               (long long)(r->wall_end_s - r->wall_start_s),
+               (int)r->tz_offset_min, ms / 60, ms % 60, me / 60, me % 60);
+    } else {
+        printf("wall clock unset - banked without wall labels\n");
+    }
+    printf("end_reason %s\n", toy_bank_end_name(r->end_reason));
+    printf("playback_verified %u\n", (unsigned)r->playback_verified);
+    printf("bank_bytes %zu\n", r->bank_bytes);
 }
 
 int main(int argc, char **argv)
@@ -319,6 +399,176 @@ int main(int argc, char **argv)
                (unsigned long long)toy_hash_state(st, cart->state_size));
         return 0;
     }
+    if (argc >= 2 && strcmp(argv[1], "clock") == 0 && argc == 2) {
+        toy_time_t now = toy_clock_now();
+        toy_schedule_t sched = toy_schedule_default();
+        printf("TOY-CLOCK valid=%d", now.valid ? 1 : 0);
+        if (now.valid) {
+            unsigned m = toy_clock_minutes_of_day(now);
+            printf(" utc_seconds=%lld tz_offset_min=%d local %02u:%02u",
+                   (long long)now.utc_seconds, (int)now.tz_offset_min,
+                   m / 60, m % 60);
+        } else {
+            printf(" (unset: schedule features off, simulation unaffected;"
+                   " set TOY_CLOCK_UTC_SECONDS)");
+        }
+        printf(" mono_ms=%llu schedule_active=%d live_warp_x100=%u"
+               " playback_warp_x100=%u keyframe_interval_s=%u\n",
+               (unsigned long long)toy_clock_mono_ms(),
+               toy_clock_is_active(now, &sched) ? 1 : 0,
+               (unsigned)sched.live_warp_x100,
+               (unsigned)sched.playback_warp_x100,
+               (unsigned)sched.keyframe_interval_s);
+        return 0;
+    }
+    if (argc >= 2 && strcmp(argv[1], "bank") == 0 && (argc == 5 || argc == 6)) {
+        const toy_cart_t *cart = toy_cart_by_name(argv[2]);
+        if (!cart) { fprintf(stderr, "unknown cart %s\n", argv[2]); return 2; }
+        check_cart_input(cart);
+        unsigned long long total = strtoull(argv[3], NULL, 10);
+        unsigned long every_ul = strtoul(argv[4], NULL, 10);
+        if (every_ul > 0xfffffffful) {
+            fprintf(stderr, "keyframe-every too large\n");
+            return 2;
+        }
+        uint32_t every = (uint32_t)every_ul;
+        char default_path[128];
+        const char *path = argv[5];
+        if (argc == 5) {
+            snprintf(default_path, sizeof default_path, "%s.bank", cart->name);
+            path = default_path;
+        }
+        uint32_t count = toy_bank_keyframe_count((uint64_t)total, every);
+        size_t est = toy_bank_estimate_size(cart, count);
+        if (est == 0) {
+            fprintf(stderr,
+                    "bank exceeds fixed budget: cart=%s steps=%llu every=%u"
+                    " needs %u keyframes, budget %u bytes allows %u;"
+                    " increase keyframe-every\n",
+                    cart->name, total, every, count,
+                    (unsigned)TOY_BANK_BUDGET_BYTES,
+                    toy_bank_max_keyframes(cart));
+            return 2;
+        }
+        unsigned char *buf = (unsigned char *)xcalloc(est);
+        void *st = xcalloc(cart->state_size);
+        toy_time_t wall0 = toy_clock_now();
+        toy_bank_writer_t w;
+        toy_bank_err_t err = toy_bank_begin(&w, cart, (uint64_t)total, every,
+                                            wall0.utc_seconds,
+                                            wall0.valid ? 1u : 0u,
+                                            wall0.tz_offset_min, buf, est);
+        if (err != TOY_BANK_OK) {
+            fprintf(stderr, "bank begin failed: %s\n", toy_bank_strerror(err));
+            return 2;
+        }
+        cart->reset(st);
+        uint32_t cur = 0;
+        toy_apply_proof_at(cart, st, 0, &cur); /* step-0 setup */
+        uint32_t next_kf = 0;
+        for (unsigned long long s = 0;; s++) {
+            if (next_kf < count &&
+                (uint64_t)s == toy_bank_keyframe_step((uint64_t)total, every,
+                                                      next_kf)) {
+                toy_time_t wl = toy_clock_now();
+                err = toy_bank_add_keyframe(&w, st, (uint64_t)s, wl.utc_seconds);
+                if (err != TOY_BANK_OK) {
+                    fprintf(stderr, "bank keyframe failed: %s\n",
+                            toy_bank_strerror(err));
+                    return 2;
+                }
+                printf("keyframe %u step %llu hash %016llx\n", next_kf, s,
+                       (unsigned long long)toy_hash_state(st, cart->state_size));
+                next_kf++;
+            }
+            if (s >= total) break;
+            toy_apply_proof_at(cart, st, (uint32_t)(s + 1), &cur);
+            cart->step(st);
+        }
+        toy_time_t wall1 = toy_clock_now();
+        size_t bank_len = 0;
+        err = toy_bank_finish(&w, wall1.utc_seconds, TOY_BANK_END_COMPLETE,
+                              &bank_len);
+        if (err != TOY_BANK_OK) {
+            fprintf(stderr, "bank finish failed: %s\n", toy_bank_strerror(err));
+            return 2;
+        }
+        if (write_file_atomic(path, buf, bank_len) != 0) {
+            fprintf(stderr, "cannot write %s\n", path);
+            return 2;
+        }
+        printf("TOY-BANK-SAVED cart=%s steps %llu every %u keyframes %u"
+               " hash %016llx bytes %zu wall_valid=%d file %s\n",
+               cart->name, total, every, count,
+               (unsigned long long)toy_hash_state(st, cart->state_size),
+               bank_len, wall0.valid ? 1 : 0, path);
+        return 0;
+    }
+    if (argc >= 2 && strcmp(argv[1], "replay") == 0 && argc == 3) {
+        size_t len = 0;
+        unsigned char *buf = read_bank_file(argv[2], &len);
+        if (!buf) { fprintf(stderr, "cannot read %s\n", argv[2]); return 2; }
+        toy_bank_info_t info;
+        const toy_cart_t *cart = NULL;
+        toy_bank_err_t err = toy_bank_parse(buf, len, NULL, &info, &cart);
+        if (err != TOY_BANK_OK) {
+            fprintf(stderr, "TOY-REPLAY-REJECTED file %s: %s\n",
+                    argv[2], toy_bank_strerror(err));
+            return 2;
+        }
+        printf("TOY-REPLAY cart=%s steps %llu every %u keyframes %u file %s\n",
+               cart->name, (unsigned long long)info.total_steps,
+               info.keyframe_every, info.keyframe_count, argv[2]);
+        for (uint32_t i = 0; i < info.keyframe_count; i++) {
+            toy_bank_keyframe_t kf;
+            toy_bank_keyframe(buf, len, &info, i, &kf);
+            printf("keyframe %u step %llu hash %016llx (stored)\n", i,
+                   (unsigned long long)kf.step_index,
+                   (unsigned long long)kf.state_hash);
+        }
+        void *scratch = xcalloc(TOY_MAX_STATE_SIZE);
+        uint32_t verified = 0, fail_idx = 0;
+        uint64_t fail_step = 0, want = 0, got = 0;
+        err = toy_bank_verify_replay(buf, len, scratch, TOY_MAX_STATE_SIZE,
+                                     &verified, &fail_idx, &fail_step,
+                                     &want, &got);
+        if (err != TOY_BANK_OK) {
+            fprintf(stderr,
+                    "TOY-REPLAY-FAILED file %s: %s at keyframe %u step %llu"
+                    " want %016llx got %016llx (verified %u before failure)\n",
+                    argv[2], toy_bank_strerror(err), fail_idx,
+                    (unsigned long long)fail_step,
+                    (unsigned long long)want, (unsigned long long)got,
+                    verified);
+            return 2;
+        }
+        printf("TOY-REPLAY-VERIFIED keyframes %u final step %llu hash %016llx\n",
+               verified, (unsigned long long)info.total_steps,
+               (unsigned long long)toy_hash_state(scratch, cart->state_size));
+        toy_morning_report_t rep;
+        err = toy_bank_morning_report(buf, len, 1u, &rep, NULL);
+        if (err != TOY_BANK_OK) {
+            fprintf(stderr, "morning report failed: %s\n",
+                    toy_bank_strerror(err));
+            return 2;
+        }
+        print_morning_report(&rep);
+        return 0;
+    }
+    if (argc >= 2 && strcmp(argv[1], "report") == 0 && argc == 3) {
+        size_t len = 0;
+        unsigned char *buf = read_bank_file(argv[2], &len);
+        if (!buf) { fprintf(stderr, "cannot read %s\n", argv[2]); return 2; }
+        toy_morning_report_t rep;
+        toy_bank_err_t err = toy_bank_morning_report(buf, len, 0u, &rep, NULL);
+        if (err != TOY_BANK_OK) {
+            fprintf(stderr, "TOY-REPORT-REJECTED file %s: %s\n",
+                    argv[2], toy_bank_strerror(err));
+            return 2;
+        }
+        print_morning_report(&rep);
+        return 0;
+    }
     fprintf(stderr,
         "usage:\n"
         "  toy_emu list\n"
@@ -327,6 +577,10 @@ int main(int argc, char **argv)
         "  toy_emu run <cart> <total-steps> <report-every>\n"
         "  toy_emu save <cart> <steps> <file>\n"
         "  toy_emu load <file> <more-steps> <report-every>\n"
+        "  toy_emu bank <cart> <steps> <keyframe-every> [file]\n"
+        "  toy_emu replay <file>\n"
+        "  toy_emu report <file>\n"
+        "  toy_emu clock\n"
         "carts:");
     for (int i = 0; i < toy_cart_count; i++) fprintf(stderr, " %s", toy_carts[i]->name);
     fprintf(stderr, "\n");

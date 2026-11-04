@@ -23,6 +23,9 @@ EXPORTS = [
     "toy_wasm_render", "toy_wasm_framebuffer", "toy_wasm_framebuffer_width",
     "toy_wasm_framebuffer_height", "toy_wasm_hash_lo", "toy_wasm_hash_hi",
     "toy_wasm_steps_lo", "toy_wasm_steps_hi", "toy_wasm_state_size",
+    # Time layer glue (JS-provided clock read-back; banking UI later).
+    "toy_wasm_clock_valid", "toy_wasm_clock_utc_lo", "toy_wasm_clock_utc_hi",
+    "toy_wasm_clock_tz_min", "toy_wasm_clock_mono_lo", "toy_wasm_clock_mono_hi",
 ]
 
 
