@@ -11,6 +11,11 @@
 #include "pico/unique_id.h"
 #include "hardware/clocks.h"
 #include "toy_cart.h"
+/* Runner-side clock stub (board/clock_board.c): civil time is
+ * unset until the RP2350 RTC kit is in hand. Read once for the
+ * TOY-CLOCK banner only; pacing here is still step counts. */
+#define TOY_CLOCK_ALLOW 1
+#include "toy_clock.h"
 
 #ifndef TOY_GIT_HEAD
 #define TOY_GIT_HEAD "unknown"
@@ -78,6 +83,15 @@ int main(void)
     pico_get_unique_board_id_string(idstr, sizeof idstr);
     printf("TOY-BOARD git %s serial %s clk_hz %lu\n",
            TOY_GIT_HEAD, idstr, (unsigned long)clock_get_hz(clk_sys));
+    /* Not part of the host==board hash gate (run_toy.sh greps
+     * TOY-RUN/step/TOY-DONE only): states the time layer's
+     * posture on this runner. valid=0 until the RTC kit. */
+    {
+        toy_time_t now = toy_clock_now();
+        printf("TOY-CLOCK valid=%d mono_ms=%llu (board stub: unset)\n",
+               now.valid ? 1 : 0,
+               (unsigned long long)toy_clock_mono_ms());
+    }
     for (int i = 0; i < toy_cart_count; i++) {
         const toy_cart_t *cart = toy_carts[i];
         if (cart->state_size > sizeof state_buf) {

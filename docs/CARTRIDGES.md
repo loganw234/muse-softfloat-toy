@@ -155,6 +155,68 @@ Rules that follow for cartridge authors:
   Do not embed a step counter the runner already keeps; the
   header carries the runner's count.
 
+## Time layer, banking & morning report
+
+Design and rationale: [study-timebank.md](study-timebank.md)
+(sections 2–5 are the interface and the arithmetic). Owner
+posture ([WAVE-T2.md](WAVE-T2.md)): always plugged in; time and
+zone offset are set manually (no network time); unset is a
+first-class state; RP2350 is primary but its RTC waits for the
+kit. This is the short contract summary.
+
+- **Placement rule (enforced by construction).** Wall time is
+  runner-owned (`core/toy_clock.h`): `toy_clock_now()` returns
+  int64 UTC seconds + zone offset minutes + a valid flag, and
+  `toy_clock_mono_ms()` is the only pacing source (clock-setting
+  can never inject or swallow steps). Nothing time-shaped may
+  enter cartridge state — state is hashed verbatim, so a
+  wall-derived byte would fork host/board/WASM hashes. The
+  header refuses to compile without a runner-side opt-in
+  (`TOY_CLOCK_ALLOW`, defined only in `emu/`, `board/`, site
+  glue, host tests), does not include `toy_cart.h`, and no
+  function in it touches state. The time layer's whole output
+  to the sim is integer step counts. Implementations are
+  per-runner: host env/CLI (`emu/clock_emu.c`), JS-provided
+  imports (`site/wasm_glue.c`), and an unset stub on board
+  (`board/clock_board.c`) until the RP2350 kit lands. Unset
+  disables schedule features (helpers degrade to always-active)
+  and never blocks simulation. Warp is parameterised
+  (`warp_x100`): **defaults live 1.00×, playback 16×** (an 8 h
+  bank in ~30 min), keyframe interval 60 s of demo time.
+- **Banking is sparse keyframes + re-stepping, never dense
+  states and never interpolation.** A `TOYBANK1` bank
+  (`core/toy_bank.{h,c}`) is a 96-byte header + a 32-byte-per-
+  keyframe index (step index, state hash, wall *label*) +
+  complete `TOYCKPT1` checkpoint images — a keyframe is a
+  checkpoint, and wall labels live beside state bytes, never
+  inside them (ordering is by step index, always). Playback
+  (`toy_emu replay`, `toy_bank_verify_replay`) seeds from the
+  first keyframe and re-steps to each later one, requiring the
+  state hash to match at every keyframe: every replayed frame
+  is an exact stepped state, and a mismatch stops playback
+  loudly. Budget is fixed at 8 MiB per bank (480 fig8 keyframes
+  at the 60 s default = ~6.4 MiB; wider spacing for larger
+  states — writers refuse past-budget counts). Host modes:
+  `toy_emu bank <cart> <steps> <keyframe-every> [file]`,
+  `replay <file>`, `report <file>`, `clock`.
+- **Morning report v1 needs no cartridge changes**
+  (`toy_morning_report_t`): cart, step range, keyframe
+  count/spacing, start/end hashes (the claim carries its own
+  re-derivation proof), wall span + expected-at-1× steps when
+  the clock was set (shortfalls print honestly), end reason,
+  and whether replay verified the hash chain. Per-cartridge
+  "notable events" are deliberately not in v1 — anything
+  reporting-shaped inside hashed state would re-pin every
+  proof hash (study section 5.3).
+- What still waits: board RTC + manual-set UI and on-device
+  banking (kit), flash/SD bank storage, schedule-driven
+  live/bank/playback modes on device and site banking UI —
+  the formats and verification above are runner-independent,
+  so those parcels add plumbing, not format changes.
+  `tools/clock_test.c` pins the layer host-side, including
+  the determinism firewall (identical step streams hash
+  identically under unset/set/jumping clocks).
+
 ## Required parcel evidence
 
 - `tools/run.sh check` passes (host determinism).
@@ -180,6 +242,11 @@ These are known before dispatching the first wave:
   parcels. Migration between `state_version`s is deliberately
   undefined while states are still changing: loaders reject,
   they never convert.
+- Time layer v1 exists host-side (runner clock, `TOYBANK1`
+  keyframe banking with verified replay, morning report - see
+  [Time layer](#time-layer-banking--morning-report) above).
+  The board clock is an unset stub and on-device/site banking
+  UIs are later parcels gated on the RP2350 kit.
 - No audio output or sensor input abstraction; FFT/microphone/IMU
   cartridges need a device-input study after the kits arrive.
 - `board/CMakeLists.txt` enumerates cartridge sources explicitly.

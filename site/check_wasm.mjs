@@ -4,7 +4,20 @@ import { join } from "node:path";
 const siteDir = process.argv[2] || ".";
 const bytes = await readFile(join(siteDir, "toy.wasm"));
 const expected = JSON.parse(await readFile(join(siteDir, "expected-hashes.json"), "utf8"));
-const { instance } = await WebAssembly.instantiate(bytes, {});
+// Time-layer glue imports: report the clock UNSET, exactly the
+// first-class state the deterministic checker must prove under
+// (pinned hashes are clock-independent by construction).
+const clockImports = {
+  env: {
+    toy_js_clock_valid: () => 0,
+    toy_js_clock_tz_min: () => 0,
+    toy_js_clock_utc_lo: () => 0,
+    toy_js_clock_utc_hi: () => 0,
+    toy_js_mono_lo: () => 0,
+    toy_js_mono_hi: () => 0,
+  },
+};
+const { instance } = await WebAssembly.instantiate(bytes, clockImports);
 const w = instance.exports;
 const dec = new TextDecoder();
 
@@ -47,6 +60,13 @@ for (let i = 0; i < w.toy_wasm_count(); i++) {
     if (!ok) failures++;
     console.log(`${ok ? "PASS" : "FAIL"} ${name} render ${size}: ${distinct.size} distinct colours`);
   }
+}
+{
+  // Clock glue round-trip: exports exist and report unset.
+  const ok = typeof w.toy_wasm_clock_valid === "function" &&
+             w.toy_wasm_clock_valid() === 0;
+  if (!ok) failures++;
+  console.log(`${ok ? "PASS" : "FAIL"} clock glue: valid=0 (unset)`);
 }
 console.log(failures ? `WASM CHECK: FAIL (${failures})` : "WASM CHECK: PASS");
 process.exit(failures ? 1 : 0);

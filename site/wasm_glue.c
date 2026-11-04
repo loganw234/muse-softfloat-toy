@@ -295,3 +295,73 @@ int toy_wasm_queue_set_param_i(uint32_t p, int32_t value)
 {
     return toy_wasm_queue_event(TOY_EV_SET_PARAM, p, 0, 0, value, 0, 0);
 }
+
+/* --- time layer: JS-provided clock imports (glue only) ---
+ * The browser runner owns wall time (docs/study-timebank.md
+ * section 2.4): JS provides these env imports, the glue
+ * assembles toy_time_t from them, and the toy_wasm_clock_*
+ * exports let the page read the value back through C. Manual
+ * set happens JS-side (the page changes what the imports
+ * return; it starts unset), so toy_clock_set has no authority
+ * here and returns false. Nothing clock-shaped is read by
+ * toy_wasm_step: pacing stays JS stepDebt -> integer counts,
+ * exactly as before, so pinned hashes cannot move. Banking UI
+ * is a later parcel; this is plumbing only. */
+#define TOY_CLOCK_ALLOW 1
+#include "toy_clock.h"
+
+__attribute__((import_module("env"), import_name("toy_js_clock_valid")))
+extern int32_t toy_js_clock_valid(void);
+__attribute__((import_module("env"), import_name("toy_js_clock_tz_min")))
+extern int32_t toy_js_clock_tz_min(void);
+__attribute__((import_module("env"), import_name("toy_js_clock_utc_lo")))
+extern uint32_t toy_js_clock_utc_lo(void);
+__attribute__((import_module("env"), import_name("toy_js_clock_utc_hi")))
+extern uint32_t toy_js_clock_utc_hi(void);
+__attribute__((import_module("env"), import_name("toy_js_mono_lo")))
+extern uint32_t toy_js_mono_lo(void);
+__attribute__((import_module("env"), import_name("toy_js_mono_hi")))
+extern uint32_t toy_js_mono_hi(void);
+
+toy_time_t toy_clock_now(void)
+{
+    toy_time_t t;
+    t.utc_seconds = (int64_t)((uint64_t)toy_js_clock_utc_lo() |
+                              ((uint64_t)toy_js_clock_utc_hi() << 32));
+    t.tz_offset_min = toy_js_clock_tz_min();
+    t.valid = toy_js_clock_valid() != 0;
+    return t;
+}
+
+uint64_t toy_clock_mono_ms(void)
+{
+    return (uint64_t)toy_js_mono_lo() | ((uint64_t)toy_js_mono_hi() << 32);
+}
+
+bool toy_clock_set(int64_t utc_seconds, int32_t tz_offset_min)
+{
+    (void)utc_seconds;
+    (void)tz_offset_min;
+    return false; /* JS owns the value; set it page-side */
+}
+
+void toy_clock_clear(void)
+{
+    /* JS owns the value; unset it page-side. */
+}
+
+int toy_wasm_clock_valid(void) { return toy_clock_now().valid ? 1 : 0; }
+uint32_t toy_wasm_clock_utc_lo(void)
+{
+    return (uint32_t)(uint64_t)toy_clock_now().utc_seconds;
+}
+uint32_t toy_wasm_clock_utc_hi(void)
+{
+    return (uint32_t)(((uint64_t)toy_clock_now().utc_seconds) >> 32);
+}
+int32_t toy_wasm_clock_tz_min(void) { return toy_clock_now().tz_offset_min; }
+uint32_t toy_wasm_clock_mono_lo(void) { return (uint32_t)toy_clock_mono_ms(); }
+uint32_t toy_wasm_clock_mono_hi(void)
+{
+    return (uint32_t)(toy_clock_mono_ms() >> 32);
+}

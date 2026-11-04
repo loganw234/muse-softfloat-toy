@@ -28,6 +28,7 @@ file(GLOB LIB_SRC ${LIB}/src/*.c)
 
 add_executable(toy_board
     main_board.c
+    clock_board.c
     ${TOY_ROOT}/core/toy_fb.c
     ${TOY_ROOT}/core/toy_carts.c
     ${TOY_ROOT}/core/cart_fig8.c
