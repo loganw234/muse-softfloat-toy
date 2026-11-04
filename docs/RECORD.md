@@ -158,3 +158,29 @@ bd852da604b03e3a reproduced, check/WASM PASS. The utility is
 not yet referenced by any cartridge or the board firmware;
 it exists so Wave T2 spectrum cartridges start from a proven
 transform.
+
+`input`, `timebank`, and `checkpoint` studies landed last
+(each planted-verified 5/5 as documents: citations,
+arithmetic, and internal consistency checked against the
+code).
+
+## Wave T1 close (2026-11-04)
+
+All fifteen Wave T1 parcels are merged: ten cartridges
+(cloud, carousel, orrery, lorenz, harmonograph, pendwave,
+mandelbrot, microscope, stagnation, intervallens) and five
+studies (input, signals, timebank, checkpoint, fft). Every
+parcel went through planted-copy independent verification
+before merge — 75 planted defects, 75 caught, each verdict
+recorded in `docs/metrics/plants.jsonl` — and every cartridge
+passed lead check + WASM + board gates on merged main with
+hashes identical across host, RP2040, and browser at every
+reported step. Two proof horizons were trimmed at merge on
+timestamped on-device measurements (cloud 434 ms/step,
+mandelbrot ~181x host); per-step maths nowhere changed.
+Final state: `tools/run.sh check` PASS (12 cartridges),
+WASM checker PASS, board budget PASS. The gallery now runs
+twelve deterministic cartridges on the live site and on the
+genuine Pico; Wave T2 (interactive/sensor cartridges on the
+input/signals seams, time banking, checkpointing, spectra on
+toy_fft) is designed and waiting on the display kits.
