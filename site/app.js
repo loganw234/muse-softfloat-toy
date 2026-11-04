@@ -173,6 +173,41 @@ async function init() {
   }
 }
 
+/* Input seam: canvas pointer -> WASM event queue. JS computes
+ * only the integer canvas pixel (pixel location); milli-radius
+ * conversion happens in C. Contact id is always 0 (primary);
+ * extra simultaneous pointers are ignored. The glue exports
+ * land in site/build.py EXPORTS separately, so feature-check. */
+const EV_POINTER_DOWN = 1, EV_POINTER_MOVE = 2, EV_POINTER_UP = 3;
+function queuePointer(canvas, size, type, event) {
+  if (!wasm || typeof wasm.toy_wasm_queue_pointer !== "function") return;
+  const rect = canvas.getBoundingClientRect();
+  if (!rect.width || !rect.height) return;
+  const px = Math.round((event.clientX - rect.left) * size / rect.width);
+  const py = Math.round((event.clientY - rect.top) * size / rect.height);
+  wasm.toy_wasm_queue_pointer(type, 0, px | 0, py | 0, size);
+}
+for (const d of displays) {
+  let activePointer = null;
+  d.canvas.addEventListener("pointerdown", (event) => {
+    if (activePointer !== null) return;
+    activePointer = event.pointerId;
+    d.canvas.setPointerCapture(event.pointerId);
+    queuePointer(d.canvas, d.size, EV_POINTER_DOWN, event);
+  });
+  d.canvas.addEventListener("pointermove", (event) => {
+    if (event.pointerId !== activePointer) return;
+    queuePointer(d.canvas, d.size, EV_POINTER_MOVE, event);
+  });
+  const release = (event) => {
+    if (event.pointerId !== activePointer) return;
+    activePointer = null;
+    queuePointer(d.canvas, d.size, EV_POINTER_UP, event);
+  };
+  d.canvas.addEventListener("pointerup", release);
+  d.canvas.addEventListener("pointercancel", release);
+}
+
 cartSelect.addEventListener("change", () => selectCartridge(Number(cartSelect.value)));
 resetButton.addEventListener("click", () => selectCartridge(selected));
 playButton.addEventListener("click", () => {
