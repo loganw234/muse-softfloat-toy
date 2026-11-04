@@ -55,7 +55,7 @@ for cart in $("$EMU" list | tr -d '\r'); do
     "$EMU" proof "$cart" >> "$BOARD_BUILD/host-lines.txt"
 done
 grep -E '^(TOY-RUN|step|TOY-DONE)' "$BOARD_BUILD/board-out.log" > "$BOARD_BUILD/board-lines.txt"
-if diff -u "$BOARD_BUILD/host-lines.txt" "$BOARD_BUILD/board-lines.txt"; then
+if diff --strip-trailing-cr -u "$BOARD_BUILD/host-lines.txt" "$BOARD_BUILD/board-lines.txt"; then
     echo "board budget: PASS (host == board at every reported step)"
 else
     fail "host/board hash streams differ"
