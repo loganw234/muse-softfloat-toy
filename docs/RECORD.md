@@ -215,3 +215,42 @@ explicitly in all thirteen cartridges.
 Repository made public today at the owner's election (MIT
 unchanged); earlier entries describing it as private are the
 historical record of how it started.
+
+## Wave T2b batch 1 lands (2026-11-04)
+
+Three parcels, each planted-copy verified 5/5 before merge
+(planted tallies in docs/metrics/plants.jsonl): SIG-1 signal
+feed seam (feed + sig_spec appended after state_version,
+feed -> apply -> step everywhere, parameter-block stream
+ids, in-state labelling, gyro dial derivation; checkpoint
+save/load refuse feed carts loudly), time layer v1
+(runner-owned clock with placement guard, TOYBANK1 sparse
+keyframe banking with hash-verified re-stepping replay,
+morning report; warp defaults live 1x, playback 16x), and
+julia, the first interactive cartridge (touch-chosen c,
+proof final 012134f7). Lead merge fixes, each delta-checked:
+bank parse now validates the header schedule and refuses
+feed carts, and julia gained its SIG-1 zero tail. One
+combined board gate over all 14 cartridges: host == board
+at every reported step on the genuine Pico (first attempt
+captured zero lines in 37 min - an attach race, firmware
+proven alive by reboot probe; the comparison was completed
+against the preserved capture). check and WASM PASS, with
+julia pinned from the lead rerun on the live site.
+
+## Wave T2b batch 2 lands (2026-11-04)
+
+Three more cartridges, again 5/5 planted-verified each:
+gravity (KDK leapfrog N-body sandbox, drag/fling spawns
+from step counters, tilt field; proof 0011689c), gpend
+(first registered feed cart: pendulum driven by the fed
+IMU gravity direction off the synthetic desk stream, proof
+651bc7de; also adds the true-underrun case to sigcore_test),
+and seismo (tremor trace + Hann FFT spectrum; the synthetic
+desk tap fires its detector exactly once at step 301;
+proof cc3111b9). sigcore_test registry assertion was
+generalized to a feed-cart allowlist after going stale
+twice on registry growth. All lead gates PASS on merged
+main (sigcore/ckpt tests, check, WASM with all three new
+carts pinned from lead reruns); the 17-cartridge board
+gate is the remaining on-device proof for this batch.
