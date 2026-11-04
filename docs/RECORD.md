@@ -41,3 +41,12 @@ from one state at both 240x240 and 360x360. URL parameters
 `?cart=`, `?steps=`, `?pause=1` deep-link an exact deterministic
 state. The WASM build verifies every proof hash against values
 pinned from the native/board runs before deployment.
+
+Deployed the same day to GitHub Pages
+(<https://loganw234.github.io/muse-softfloat-toy/>) from the
+private repository; note the Pages site itself is public even
+though the source repository is private. The first workflow run
+built and verified the WASM successfully but stopped at Pages
+configuration until Pages was explicitly enabled for Actions;
+the rerun deployed and the live deep-linked pendulum state at
+step 3600 rendered with the expected hash on both displays.

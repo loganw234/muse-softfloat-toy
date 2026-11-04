@@ -8,8 +8,14 @@ every state re-derivable bit-for-bit on a desktop. Built on
 binary64 arithmetic is the simulation engine for every cartridge.
 
 Private during development. The design of record is
-[docs/TOY-0.md](docs/TOY-0.md); the dated project record is
-[docs/RECORD.md](docs/RECORD.md).
+[docs/TOY-0.md](docs/TOY-0.md); new simulations follow
+[docs/CARTRIDGES.md](docs/CARTRIDGES.md); the dated project record
+is [docs/RECORD.md](docs/RECORD.md).
+
+**Live emulator:** <https://loganw234.github.io/muse-softfloat-toy/>
+— the real C sim core in WebAssembly, rendered at both glass sizes.
+Exact states can be deep-linked, e.g.
+`?cart=pendulum&steps=3600&pause=1`.
 
 ## Layout
 
