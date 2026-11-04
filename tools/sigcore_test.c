@@ -386,4 +386,3 @@ int main(void)
            failures);
     return failures ? 1 : 0;
 }
-
