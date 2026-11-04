@@ -48,6 +48,7 @@ add_executable(toy_board
     ${TOY_ROOT}/core/toy_signal.c
     ${TOY_ROOT}/core/cart_orbitspec.c
     ${TOY_ROOT}/core/cart_julia.c
+    ${TOY_ROOT}/core/cart_gpend.c
     ${LIB_SRC}
 )
 target_include_directories(toy_board PRIVATE ${LIB}/include ${TOY_ROOT}/core)

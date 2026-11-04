@@ -15,7 +15,10 @@
  *      a known synthetic constant-rate rotation, in both
  *      directions, past a full turn, with remainder kept
  *   6. a signal-deaf cart (fig8) is untouched by the helpers
- *   7. descriptor validation and the proof underrun refusal
+ *   7. descriptor validation and the proof underrun refusal,
+ *      including a TRUE underrun: a finite source that matches
+ *      the spec but is exhausted must yield rc 2 (not the rc 1
+ *      mismatch), feed() uncalled and state untouched
  *
  * Build (from repo root, Git Bash):
  *   gcc -O2 -std=c11 -Wall -Wextra -Ilibs/muse-softfloat/include
@@ -301,21 +304,31 @@ int main(void)
     /* 5. Dial derivation on the known rotation. */
     dial_checks();
 
-    /* 6. Deaf path: helpers must not touch fig8, and every
-     * registered cart must still be signal-deaf + valid. */
+    /* 6. Deaf path: helpers must not touch fig8, every
+     * registered cart except gpend (the first feed cart) must
+     * still be signal-deaf + valid, and gpend's descriptor must
+     * instantiate its synthetic proof source. */
     {
         const toy_cart_t *fig8 = toy_cart_by_name("fig8");
-        int registry_ok = fig8 != 0;
+        const toy_cart_t *gpend = toy_cart_by_name("gpend");
+        int registry_ok = fig8 != 0 && gpend != 0 && gpend->feed != 0;
+        int feed_carts = 0;
         for (int i = 0; i < toy_cart_count; i++) {
             const toy_cart_t *c = toy_carts[i];
             toy_sig_source_t unused;
-            if (c->feed || toy_cart_check_signal(c) != 0 ||
-                toy_sig_proof_source_init(c, &unused) != 0)
+            int created = toy_sig_proof_source_init(c, &unused);
+            if (toy_cart_check_signal(c) != 0) registry_ok = 0;
+            if (c->feed) {
+                feed_carts++;
+                if (c != gpend || created != 1) registry_ok = 0;
+            } else if (created != 0) {
                 registry_ok = 0;
+            }
         }
-        printf("registered carts: %d\n", toy_cart_count);
-        expect(registry_ok && toy_cart_count == 13,
-               "all 13 registered carts are signal-deaf and valid");
+        printf("registered carts: %d (feed carts: %d)\n",
+               toy_cart_count, feed_carts);
+        expect(registry_ok && feed_carts == 1 && toy_cart_count == 15,
+               "14 registered carts signal-deaf and valid; gpend is the one feed cart");
         void *a = calloc(1, fig8->state_size);
         void *b = calloc(1, fig8->state_size);
         if (!a || !b) return 2;
@@ -380,6 +393,53 @@ int main(void)
                            TOY_SIG_MAX_FRAME_VALUES);
         expect(rc != 0 && s.feed_calls == 0,
                "proof feed refuses a rate-mismatched source");
+
+        /* TRUE underrun: a finite (2-sample TSIG replay) source
+         * whose device/channels/rate MATCH the spec, drained to
+         * exhaustion directly through toy_sig_poll. A subsequent
+         * toy_feed_step must reach the poll and fail on the
+         * underrun itself - rc 2, distinct from the rc 1
+         * mismatches above - with feed() uncalled and the state
+         * bytes untouched. */
+        {
+            int16_t vals[12] = { 0 };
+            vals[2] = 16384; vals[8] = 16384; /* az = 1 g, both samples */
+            toy_sig_info_t ri;
+            memset(&ri, 0, sizeof ri);
+            ri.kind = TOY_SIG_KIND_REPLAY;
+            ri.orig_kind = TOY_SIG_KIND_SYNTHETIC;
+            ri.device = TOY_SIG_DEVICE_IMU6;
+            ri.channels = 6u;
+            ri.sample_rate_hz = 100u;
+            ri.scale_num = 16384u;
+            ri.scale2_num = 128u;
+            ri.scenario_id = 1u;
+            ri.seed = TEST_SEED;
+            ri.n_samples = 2u;
+            uint8_t tsig[TOY_SIG_HEADER_SIZE + sizeof vals];
+            toy_sig_write_header(tsig, &ri,
+                                 toy_sig_hash_samples(vals, 2u, 6u));
+            toy_sig_write_payload(tsig + TOY_SIG_HEADER_SIZE, vals, 2u, 6u);
+            toy_sig_source_t finite;
+            uint32_t pflags = 99u;
+            uint32_t drained = 99u;
+            if (toy_sig_source_replay(&finite, tsig, sizeof tsig) == 0)
+                drained = toy_sig_poll(&finite, tsig, sizeof tsig,
+                                       frame_buf, 2u, &pflags);
+            memset(&s, 0, sizeof s);
+            sig_reset(&s);
+            h_before = toy_hash_state(&s, sizeof s);
+            rc = toy_feed_step(&sig_cart, &s, &finite, frame_buf,
+                               TOY_SIG_MAX_FRAME_VALUES);
+            printf("exhausted matched replay: direct poll got %u "
+                   "flags %u, feed rc=%d hash %016llx\n",
+                   drained, pflags, rc,
+                   (unsigned long long)toy_hash_state(&s, sizeof s));
+            expect(drained == 2u && pflags == 0u && rc == 2 &&
+                   s.feed_calls == 0 &&
+                   toy_hash_state(&s, sizeof s) == h_before,
+                   "true underrun from exhausted matched source: rc 2, feed uncalled, state untouched");
+        }
     }
 
     printf(failures ? "sigcore_test: FAIL (%d)\n" : "sigcore_test: PASS\n",
