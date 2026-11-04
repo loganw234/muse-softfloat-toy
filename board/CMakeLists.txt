@@ -44,6 +44,7 @@ add_executable(toy_board
     ${TOY_ROOT}/core/cart_mandelbrot.c
     ${TOY_ROOT}/core/toy_fft.c
     ${TOY_ROOT}/core/cart_orbitspec.c
+    ${TOY_ROOT}/core/cart_julia.c ${TOY_ROOT}/core/toy_input.c
     ${LIB_SRC}
 )
 target_include_directories(toy_board PRIVATE ${LIB}/include ${TOY_ROOT}/core)
