@@ -34,6 +34,7 @@ add_executable(toy_board
     ${TOY_ROOT}/core/cart_pendulum.c
     ${TOY_ROOT}/core/cart_carousel.c
     ${TOY_ROOT}/core/cart_stagnation.c
+    ${TOY_ROOT}/core/cart_microscope.c
     ${LIB_SRC}
 )
 target_include_directories(toy_board PRIVATE ${LIB}/include ${TOY_ROOT}/core)

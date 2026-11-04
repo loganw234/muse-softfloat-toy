@@ -38,6 +38,7 @@ extern const toy_cart_t toy_cart_fig8;
 extern const toy_cart_t toy_cart_pendulum;
 extern const toy_cart_t toy_cart_carousel;
 extern const toy_cart_t toy_cart_stagnation;
+extern const toy_cart_t toy_cart_microscope;
 
 extern const toy_cart_t *const toy_carts[];
 extern const int toy_cart_count;
