@@ -46,6 +46,14 @@ struct toy_cart_s {
     const toy_proof_input_t *proof_inputs; /* or NULL */
     uint32_t proof_input_count;         /* <= TOY_MAX_PROOF_INPUTS */
     uint32_t input_caps;                /* TOY_CAP_* mask */
+    /* Checkpoint payload-layout version (core/toy_ckpt.h,
+     * docs/study-checkpoint.md section 4). Bump on ANY state-struct
+     * or step-semantics change; loaders reject mismatches rather
+     * than guess. Appended after the input fields (WAVE-T2 tail
+     * order) so existing positional initialisers zero-fill it: 0
+     * is every current cartridge's layout version. Referenced by
+     * name only, never by offset. */
+    uint32_t state_version;
 };
 
 extern const toy_cart_t toy_cart_fig8;
