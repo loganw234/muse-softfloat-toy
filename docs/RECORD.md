@@ -150,3 +150,11 @@ carried in state so emulated data cannot alias measured.
 Merged with check/WASM PASS; the board firmware does not
 include this utility yet, so no board re-run was needed for
 this landing (host and WASM builds glob it in cleanly).
+
+`fft` landed next: planted verification 5/5 (defects
+separated by symptom class - scramble/mirror/smear/scale/
+bound), lead fft_test rerun PASS with the pinned output hash
+bd852da604b03e3a reproduced, check/WASM PASS. The utility is
+not yet referenced by any cartridge or the board firmware;
+it exists so Wave T2 spectrum cartridges start from a proven
+transform.
