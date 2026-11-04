@@ -33,6 +33,11 @@ study/parcel first.
   named payload patterns) and must say so.
 - `step()` advances one fixed internal dt and does bounded work.
   It does not allocate, print, read input, or branch on platform.
+  Input reaches a cartridge only through the optional `apply()`
+  callback at step boundaries (see "Input & settings seam");
+  `step()` itself stays input-free. `apply()` obeys the same
+  rules as `step()`: softfloat only, no allocation, no I/O, no
+  wall clock, bounded work, writes only its own state.
 - `render()` is `const` in effect as well as signature. It may use
   native `double` only to place already-computed state on screen;
   a value converted for display must never flow back into state.
@@ -46,6 +51,58 @@ study/parcel first.
   comparison run. Pick a horizon long enough to leave the initial
   transient and exercise the phenomenon, short enough for a routine
   board gate (aim under roughly three minutes on RP2040).
+
+## Input & settings seam
+
+Design and rationale: [study-input.md](study-input.md) (section 5
+is the interface, section 6 the determinism contract). This is
+the short contract summary.
+
+- Six descriptor fields are appended after `render`: `apply`,
+  `params`, `param_count`, `proof_inputs`, `proof_input_count`,
+  `input_caps`. Existing positional initialisers zero-fill them,
+  so a cart that sets none of them is a *deaf cart*
+  (`apply == NULL`) and its proof hashes are unchanged.
+- Runners convert every input source into one 32-byte
+  integer-only `toy_event_t` (`core/toy_input.h`) and quantise it
+  to step boundaries: an event assigned to step *s* is applied
+  after step *s−1* and before step *s*; step 0 is the
+  post-`reset()` setup slot. Events within a step apply in FIFO
+  order; at most `TOY_MAX_EVENTS_PER_STEP` (16) apply before one
+  step and any excess **carries** to the next step boundary in
+  order (never dropped or reordered at drain). Drops happen only
+  on a full 64-entry live queue at enqueue time; proof/replayed
+  runs must be authored under the caps. Hashes are taken only
+  after `step()`, never between `apply()` and `step()`.
+- Event kinds: pointer (milli-radius coordinates, +y down,
+  converted from raw pixels in C by `toy_pointer_event`), keys,
+  buttons, encoder, tilt, shake, face, `SET_PARAM`, and `DIAL`
+  (integer milliturn delta, IMU-derived turn-the-device gesture;
+  producer lands later). `input_caps` declares what the cart
+  listens to; runners queue only those kinds. `apply()` must
+  ignore unknown types and out-of-range ids.
+- Settings are a per-cart parameter table (`toy_param_t`: I32,
+  ENUM, or F64 with decimal-string bounds/defaults). Values enter
+  state only as `SET_PARAM` events (`v` for I32/ENUM, IEEE bits
+  in `bits` for F64, built by `toy_param_event`, never from a
+  host float). `reset()` means defaults; a runner applies user
+  settings in param-index order as step-0 events. The cart clamps
+  to the declared range and stores only effects in state, so the
+  state hash covers inputs.
+- Interactive proof runs replay the descriptor's compiled-in
+  `proof_inputs` script at exact step indices on host, board and
+  WASM. Scriptless carts print byte-identical `TOY-RUN` lines;
+  scripted carts add `inputs=`/`input_hash=` so diffs prove the
+  same script ran. Author the script to exercise the phenomenon,
+  keep it within the per-step cap, and use emulator frame sheets
+  (proof entries apply at absolute steps) for visual evidence.
+- Integer event values become softfloat state via
+  `toy_f64_bits_from_i32` / `toy_f64_bits_from_milli`
+  (`core/toy_input.h`), never native conversion. Runners keep
+  owning their step loops; the shared helpers
+  (`toy_apply_proof_at`, `toy_apply_live`, `toy_apply_queue`)
+  only apply. `tools/input_test.c` is a runnable example of the
+  whole seam with a minimal listening cart.
 
 ## Rendering rules
 
@@ -73,10 +130,10 @@ study/parcel first.
 
 These are known before dispatching the first wave:
 
-- No input event, settings, or parameter interface: interactive
-  cartridges that need touch/IMU or user-tunable parameters need a
-  small interface study first. Non-interactive and internally varied
-  simulations are ready now.
+- Input/settings seam landed (see "Input & settings seam"
+  above). Interactive carts are parcel-ready; the IMU dial
+  *producer* and raw sensor streams still wait for the signals
+  seam and kits.
 - No checkpoint serialization beyond "state bytes are the save file":
   versioning/migration is deliberately undefined while states are
   still changing.

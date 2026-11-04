@@ -18,13 +18,39 @@
 
 static _Alignas(8) unsigned char state_buf[TOY_MAX_STATE_SIZE];
 
+/* Input seam: the proof loop replays each cart's compiled-in
+ * proof_inputs script at its recorded steps (step 0 after reset,
+ * then before each numbered step) through the shared helpers in
+ * toy_cart.h, exactly as the host emu does; the TOY-RUN line gains
+ * inputs=/input_hash= only for scripted carts. The live event
+ * queue exists here but stays empty: this proof firmware has no
+ * touch/IMU/input source on current hardware, so nothing ever
+ * enqueues. Its (empty) drain runs each step to keep the seam
+ * exercised; a future live firmware enqueues from drivers and
+ * drains through the same call. */
+static toy_queue_t board_live_queue;
+
 static void run_cart(const toy_cart_t *cart, long total, long every)
 {
     memset(state_buf, 0, cart->state_size);
     cart->reset(state_buf);
-    printf("TOY-RUN cart=%s state_size=%u hash=fnv1a64\n",
+    toy_queue_clear(&board_live_queue);
+    uint32_t cur = 0;
+    toy_apply_proof_at(cart, state_buf, 0, &cur); /* step-0 setup */
+    printf("TOY-RUN cart=%s state_size=%u hash=fnv1a64",
            cart->name, (unsigned)cart->state_size);
+    if (cart->proof_input_count)
+        printf(" inputs=%u input_hash=%016llx",
+               (unsigned)cart->proof_input_count,
+               (unsigned long long)toy_hash_inputs(cart->proof_inputs,
+                                                  cart->proof_input_count));
+    printf("\n");
     for (long s = 1; s <= total; s++) {
+        uint32_t before = cur;
+        toy_apply_proof_at(cart, state_buf, (uint32_t)s, &cur);
+        /* Empty on current hardware; live cap shares the step cap. */
+        toy_apply_queue(cart, state_buf, &board_live_queue,
+                        TOY_MAX_EVENTS_PER_STEP - (cur - before));
         cart->step(state_buf);
         if (every > 0 && (s % every) == 0) {
             printf("step %ld hash %016llx\n", s,
@@ -58,6 +84,10 @@ int main(void)
             printf("TOY-SKIP cart=%s state_size=%u exceeds %u\n",
                    cart->name, (unsigned)cart->state_size,
                    (unsigned)sizeof state_buf);
+            continue;
+        }
+        if (toy_cart_check_input(cart)) {
+            printf("TOY-BAD-CART cart=%s\n", cart->name);
             continue;
         }
         run_cart(cart, (long)cart->proof_steps,
