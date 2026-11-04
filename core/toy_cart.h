@@ -93,6 +93,7 @@ extern const toy_cart_t toy_cart_cloud;
 extern const toy_cart_t toy_cart_mandelbrot;
 extern const toy_cart_t toy_cart_orbitspec;
 extern const toy_cart_t toy_cart_julia;
+extern const toy_cart_t toy_cart_seismo;
 
 extern const toy_cart_t *const toy_carts[];
 extern const int toy_cart_count;
