@@ -58,6 +58,46 @@ study/parcel first.
 - If interpolation is ever added for banked playback, it belongs to
   the presentation layer and must be labelled drawing, not a state.
 
+## Checkpoints
+
+State bytes are the save file, wrapped in the `TOYCKPT1` image:
+a 64-byte little-endian header (magic, envelope version, cart
+name, `state_size`, `state_version`, runner step count, the
+proof FNV hash, and header/payload CRC-32s) followed by the
+state verbatim. The format is specified in
+[study-checkpoint.md](study-checkpoint.md) section 2 and
+implemented once in `core/toy_ckpt.{h,c}` for every runner;
+`toy_emu save`/`load` is the host reference and
+`tools/ckpt_test.c` pins the bytes (golden header, rejection
+matrix, resume-continuity). A checkpoint taken on any runner
+must resume bit-exact on every other.
+
+Rules that follow for cartridge authors:
+
+- `state_version` is the payload-layout version in the
+  descriptor (last field; existing cartridges are version 0).
+  Any state-layout change MUST bump it: field
+  added/removed/reordered/resized, trail length changed, a
+  constant folded into state changed meaning, `sizeof` changed
+  for any reason, or `step()` computing something different
+  from the same bytes. Loaders reject version mismatches
+  loudly and never migrate or guess; a forgotten bump is a
+  silent fork of every saved history.
+- Because the payload is verbatim, the struct's byte layout
+  must mean the same thing on every target: order fields by
+  descending alignment (8-byte, then 4, 2, 1), group same-width
+  fields, and rely on `reset()`'s whole-struct memset to keep
+  any padding 0x00 (study section 3). If a change alters
+  `sizeof` or any field offset, that is the bump above.
+- Cartridge names are capped at 15 ASCII characters (the
+  header's 16-byte name field needs its NUL), enforced by
+  `tools/ckpt_test.c` over the registry.
+- Everything `step()` will ever read must live in the state
+  bytes at every step boundary - an input or setting that
+  affects stepping from outside state silently voids resume.
+  Do not embed a step counter the runner already keeps; the
+  header carries the runner's count.
+
 ## Required parcel evidence
 
 - `tools/run.sh check` passes (host determinism).
@@ -77,9 +117,12 @@ These are known before dispatching the first wave:
   cartridges that need touch/IMU or user-tunable parameters need a
   small interface study first. Non-interactive and internally varied
   simulations are ready now.
-- No checkpoint serialization beyond "state bytes are the save file":
-  versioning/migration is deliberately undefined while states are
-  still changing.
+- Checkpoint core exists (`core/toy_ckpt.{h,c}`, host
+  `save`/`load` - see [Checkpoints](#checkpoints) above), but
+  the board flash-slot and browser IndexedDB backends are later
+  parcels. Migration between `state_version`s is deliberately
+  undefined while states are still changing: loaders reject,
+  they never convert.
 - No audio output or sensor input abstraction; FFT/microphone/IMU
   cartridges need a device-input study after the kits arrive.
 - `board/CMakeLists.txt` enumerates cartridge sources explicitly.

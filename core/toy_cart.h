@@ -32,6 +32,13 @@ typedef struct {
     void (*reset)(void *st);
     void (*step)(void *st);
     void (*render)(const void *st, toy_fb_t *fb);
+    /* Checkpoint payload-layout version (core/toy_ckpt.h,
+     * docs/study-checkpoint.md section 4). Bump on ANY state-struct
+     * or step-semantics change; loaders reject mismatches rather
+     * than guess. Appended last so existing positional
+     * initialisers zero-fill it: 0 is every current cartridge's
+     * layout version. Referenced by name only, never by offset. */
+    uint32_t state_version;
 } toy_cart_t;
 
 extern const toy_cart_t toy_cart_fig8;
