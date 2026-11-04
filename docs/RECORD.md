@@ -128,3 +128,14 @@ maths is unchanged - the trimmed stream's step-1000 hash and
 the 10000-step check hash are the verified values - and the
 separation growth at 1000 steps is x244, per the parcel's own
 table.
+
+`mandelbrot` landed last of the cartridges: planted
+verification 5/5, then check/WASM/board PASS. Its proof was
+trimmed by the lead at merge, 896 -> 672 steps (exactly six
+stage cycles, ending on the held stage-5 grid where the
+binary32 half has collapsed), after a timestamped on-device
+measurement of ~1.2-2.0 s per compute step (~181x host)
+projected the original proof at ~24 minutes of board time.
+The cumulative board gate for all twelve cartridges now runs
+inside a 3600 s capture window. All ten Wave T1 cartridges
+are landed; the five seam studies follow.
