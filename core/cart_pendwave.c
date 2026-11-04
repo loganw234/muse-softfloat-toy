@@ -181,5 +181,5 @@ static void pendwave_render(const void *st_, toy_fb_t *fb)
 const toy_cart_t toy_cart_pendwave = {
     "pendwave", "Pendulum Wave",
     "Twenty pendulums, 20 to 39 beats in 30 s: order, patterns, return.",
-    sizeof(pendwave_state), 75, 3375, 375, pendwave_reset, pendwave_step, pendwave_render
+    sizeof(pendwave_state), 75, 3375, 375, pendwave_reset, pendwave_step, pendwave_render, 0, 0, 0, 0, 0, 0, 0
 };

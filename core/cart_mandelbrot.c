@@ -278,5 +278,5 @@ static void mandel_render(const void *st_, toy_fb_t *fb)
 const toy_cart_t toy_cart_mandelbrot = {
     "mandelbrot", "Two Precisions, One Set",
     "Top F32, bottom F64. As the zoom deepens, watch the top dissolve.",
-    sizeof(mandel_state), 16, 672, 112, mandel_reset, mandel_step, mandel_render
+    sizeof(mandel_state), 16, 672, 112, mandel_reset, mandel_step, mandel_render, 0, 0, 0, 0, 0, 0, 0
 };

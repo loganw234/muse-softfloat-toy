@@ -208,5 +208,5 @@ static void stag_render(const void *st_, toy_fb_t *fb)
 const toy_cart_t toy_cart_stagnation = {
     "stagnation", "Stagnation",
     "Adding 1 forever: binary16/32/64 freeze at 2^p. The augmented lane keeps the change.",
-    sizeof(stag_state), 100, 4000, 500, stag_reset, stag_step, stag_render
+    sizeof(stag_state), 100, 4000, 500, stag_reset, stag_step, stag_render, 0, 0, 0, 0, 0, 0, 0
 };

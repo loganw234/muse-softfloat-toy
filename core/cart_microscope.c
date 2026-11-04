@@ -295,5 +295,5 @@ static void micro_render(const void *st_, toy_fb_t *fb)
 const toy_cart_t toy_cart_microscope = {
     "microscope", "Function Microscope",
     "Zoom into sqrt(x) at x=2 until binary64 steps appear.",
-    sizeof(micro_state), 13, 1020, 102, micro_reset, micro_step, micro_render
+    sizeof(micro_state), 13, 1020, 102, micro_reset, micro_step, micro_render, 0, 0, 0, 0, 0, 0, 0
 };
