@@ -86,3 +86,9 @@ planted copy), then check/WASM/board PASS with lead-pinned
 hashes identical to the parcel report. Pattern life on the
 Pico is the designed 1507 steps; the six detuned rosettes
 render inside the glass at both sizes.
+
+`lorenz` landed next: planted verification 5/5 (the verifier
+separated two same-symptom twin plants by reset-bit and dt
+evidence), then check/WASM/board PASS with lead-pinned hashes
+identical to the parcel report. The one-ulp twins separate
+at step ~6.3k on the Pico exactly as on the host.
