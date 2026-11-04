@@ -121,7 +121,8 @@ typedef enum {
     TOY_BANK_ERR_INDEX_MISMATCH,  /* index != embedded header */
     TOY_BANK_ERR_REPLAY_HASH,     /* restep hash != keyframe hash */
     TOY_BANK_ERR_OUT_TOO_SMALL,
-    TOY_BANK_ERR_SEQUENCE         /* writer calls out of order */
+    TOY_BANK_ERR_SEQUENCE,        /* writer calls out of order */
+    TOY_BANK_ERR_FEED_CART        /* signal-feed cart: replay cannot re-feed yet */
 } toy_bank_err_t;
 
 /* Why a bank ended (study section 5.2 + the USER value section

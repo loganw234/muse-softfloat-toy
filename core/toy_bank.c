@@ -67,6 +67,7 @@ const char *toy_bank_strerror(toy_bank_err_t err)
     case TOY_BANK_ERR_REPLAY_HASH:   return "restep hash != keyframe hash";
     case TOY_BANK_ERR_OUT_TOO_SMALL: return "destination too small";
     case TOY_BANK_ERR_SEQUENCE:      return "writer calls out of order";
+    case TOY_BANK_ERR_FEED_CART:     return "signal-feed carts cannot bank yet";
     }
     return "?";
 }
@@ -146,6 +147,10 @@ toy_bank_err_t toy_bank_begin(toy_bank_writer_t *w, const toy_cart_t *cart,
                               unsigned char *buf, size_t cap)
 {
     if (!w || !cart || !buf) return TOY_BANK_ERR_NULL;
+    /* Replay re-steps without a signal source (source position
+     * is runner-owned, like checkpoints): refuse feed carts
+     * loudly until re-feeding lands with the first such cart. */
+    if (cart->feed) return TOY_BANK_ERR_FEED_CART;
     uint32_t count = toy_bank_keyframe_count(total_steps, every);
     size_t total = toy_bank_estimate_size(cart, count);
     if (total == 0) return TOY_BANK_ERR_COUNT; /* past budget/cap */
@@ -285,8 +290,8 @@ toy_bank_err_t toy_bank_parse(const unsigned char *buf, size_t len,
     parsed.end_reason = buf[77];
     parsed.index_crc32 = get_u32le(buf + 80);
     parsed.header_crc32 = get_u32le(buf + 92);
-    if (parsed.wall_valid > 1u || get_u16le(buf + 78) != 0u ||
-        get_u64le(buf + 84) != 0u)
+    if (parsed.wall_valid > 1u || parsed.end_reason > TOY_BANK_END_USER ||
+        get_u16le(buf + 78) != 0u || get_u64le(buf + 84) != 0u)
         return TOY_BANK_ERR_FLAGS;
 
     const toy_cart_t *cart = toy_cart_by_name(parsed.cart_name);
@@ -300,6 +305,11 @@ toy_bank_err_t toy_bank_parse(const unsigned char *buf, size_t len,
         return TOY_BANK_ERR_STATE_VERSION;
     if (parsed.keyframe_count == 0 ||
         parsed.keyframe_count > toy_bank_max_keyframes(cart))
+        return TOY_BANK_ERR_COUNT;
+    /* Index must agree with the header schedule, not merely be
+     * monotone: count and every step are derived values. */
+    if (parsed.keyframe_count !=
+        toy_bank_keyframe_count(parsed.total_steps, parsed.keyframe_every))
         return TOY_BANK_ERR_COUNT;
     if (len != bank_layout_size(cart->state_size, parsed.keyframe_count))
         return TOY_BANK_ERR_LENGTH;
@@ -322,6 +332,10 @@ toy_bank_err_t toy_bank_parse(const unsigned char *buf, size_t len,
             (size_t)kf.image_len != image_len)
             return TOY_BANK_ERR_INDEX;
         if (i > 0 && kf.step_index <= prev_step) return TOY_BANK_ERR_INDEX;
+        if (kf.step_index != toy_bank_keyframe_step(parsed.total_steps,
+                                                    parsed.keyframe_every,
+                                                    i))
+            return TOY_BANK_ERR_INDEX;
         prev_step = kf.step_index;
 
         toy_ckpt_info_t ci;
@@ -362,6 +376,7 @@ toy_bank_err_t toy_bank_verify_replay(const unsigned char *buf, size_t len,
     const toy_cart_t *cart = 0;
     toy_bank_err_t err = toy_bank_parse(buf, len, NULL, &info, &cart);
     if (err != TOY_BANK_OK) return err;
+    if (cart->feed) return TOY_BANK_ERR_FEED_CART; /* cannot re-feed yet */
     if (scratch_cap < cart->state_size) return TOY_BANK_ERR_OUT_TOO_SMALL;
 
     /* Seed from keyframe 0 through the checkpoint loader (which
