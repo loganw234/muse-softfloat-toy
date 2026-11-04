@@ -59,3 +59,4 @@
 {"parcel": "toy3-sitemock", "status": "verdict", "caught": 5, "plants": 5, "extra_findings": ["minor: app.js f64Bits endian comment in report reversed (integer bits still correct)"], "verifier_report": "scratch/toy2/verify-sitemock.md", "checked_by": "lead-merge"}
 {"parcel": "toy3-heartbeat", "parcel_commit": "b260773c5906247502c2c4d32aa1248e5794b750", "copy_head": "7738af1e7268aad68535cf34b2e845719addba80", "plants": 5, "key_sha256": "839d40c8576cced1a68029b46464a3cb95b14203f3842a3077271ed7fa3762df", "checked_by": "lead-merge", "status": "dispatched"}
 {"parcel": "toy3-session", "status": "verdict", "caught": 5, "plants": 5, "extra_findings": [], "verifier_report": "scratch/toy2/verify-session.md", "checked_by": "lead-merge"}
+{"parcel": "toy3-heartbeat", "status": "verdict", "caught": 5, "plants": 5, "extra_findings": [], "verifier_report": "scratch/toy2/verify-heartbeat.md", "checked_by": "lead-merge"}
