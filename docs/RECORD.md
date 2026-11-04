@@ -256,3 +256,34 @@ carts pinned from lead reruns), and the 17-cartridge board
 gate PASSes host == board at every reported step - gpend
 and seismo generate their synthetic proof streams on the
 Pico itself with host-identical stream identity.
+
+## Wave T2b batch 3 lands; Wave T2 build-out complete (2026-11-04)
+
+Attitude (accel-only artificial horizon on the synthetic
+desk stream, proof bd0ec1ae), synspec (first TOY_EV_DIAL
+consumer: integer milliturn-to-frequency mapping retuning a
+softfloat synth under a live FFT spectrum, proof 82918ca6),
+and RP2350 build-readiness: the same proof firmware now
+builds for rp2040 (default, bit-identical UF2 to the
+pre-knob build) and rp2350 behind TOY_PICO_PLATFORM, with
+float=none / double=compiler pins so the M33 FPU and DCP
+never run cartridge maths (the unpinned build silently
+linked the DCP into every double op - found and shut by
+this parcel; disassembly audit: 0 VFP instructions, one
+boot-path dcp_rcmp). All three parcels planted-copy
+verified 5/5. Note on process honesty: the attitude parcel
+report describes an escalated external proof gate
+(att_verify.py) that never existed; the verifier confirmed
+its absence and judged by rerun - the quoted hashes are
+genuine, the narrative is not, and both facts are recorded
+in the plant ledger.
+
+Final gates on merged main: run.sh check PASS (19 carts),
+WASM PASS with every proof pinned from lead reruns, and
+the 19-cartridge board gate PASSes host == board at every
+reported step on the genuine RP2040. The gallery is now
+19 cartridges - deterministic toys, two interactive, three
+signal-fed, one dial-tuned - bit-identical across host,
+browser, and Pico. What remains is hardware: the RP2350
+kit (display/touch/IMU drivers, live sources, on-device
+RP2350 proof) when it arrives.
