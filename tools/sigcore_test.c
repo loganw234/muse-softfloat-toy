@@ -313,7 +313,7 @@ int main(void)
      * went stale twice: 13 after julia, 15 after gravity). */
     {
         static const char *const feed_names[] = { "gpend", "seismo",
-                                                  "attitude" };
+                                                  "attitude", "heartbeat" };
         const toy_cart_t *fig8 = toy_cart_by_name("fig8");
         int registry_ok = fig8 != 0 && fig8->feed == 0;
         int feed_carts = 0;
@@ -376,6 +376,67 @@ int main(void)
         bad.sig_spec.device = 99u;
         expect(toy_cart_check_signal(&bad) != 0,
                "unknown device rejected");
+
+        /* Scenario allowlist is {1, 2} (Wave T3 added IMU6
+         * "chest"): 0 and >=3 are rejected at validation... */
+        bad = sig_cart;
+        bad.sig_spec.scenario_id = 3u;
+        expect(toy_cart_check_signal(&bad) != 0,
+               "scenario 3 rejected (allowlist is 1 and 2)");
+        bad = sig_cart;
+        bad.sig_spec.scenario_id = 0u;
+        /* scenario 0 zeroes that field but the rest of the spec
+         * is still set, so this is a spec - and a bad one. */
+        expect(toy_cart_check_signal(&bad) != 0,
+               "scenario 0 rejected");
+
+        /* ...while scenario 2 validates, instantiates through
+         * the proof-source dispatch, and feeds sanely: az rests
+         * near +1 g (flat on sternum), unlike the desk tilt. */
+        toy_cart_t chest = sig_cart;
+        chest.sig_spec.scenario_id = 2u;
+        expect(toy_cart_check_signal(&chest) == 0,
+               "scenario 2 (chest) accepted by validation");
+        {
+            sig_state s;
+            toy_sig_source_t src;
+            int created = toy_sig_proof_source_init(&chest, &src);
+            expect(created == 1 && src.info.scenario_id == 2u &&
+                   src.info.kind == TOY_SIG_KIND_SYNTHETIC,
+                   "scenario 2 proof source instantiates");
+            memset(&s, 0, sizeof s);
+            sig_reset(&s);
+            int feed_ok = created == 1;
+            for (int step = 0; feed_ok && step < 200; step++) {
+                if (toy_feed_step(&chest, &s, &src, frame_buf,
+                                  TOY_SIG_MAX_FRAME_VALUES) != 0)
+                    feed_ok = 0;
+                sig_step(&s);
+            }
+            printf("scenario 2 feed: samples %llu az sum %lld "
+                   "stream %016llx\n",
+                   (unsigned long long)s.label.samples_seen,
+                   (long long)s.sum[2],
+                   (unsigned long long)s.label.stream_id);
+            expect(feed_ok && s.feed_calls == 200u &&
+                   s.label.samples_seen == 400u && s.bad_fresh == 0 &&
+                   s.label.stream_id == src.info.stream_id &&
+                   s.sum[2] > 400ll * 15800 && s.sum[2] < 400ll * 17000,
+                   "scenario 2 feeds: 2/step exact, az rests near +1 g");
+        }
+
+        /* A device/scenario combo with no generator (MIC
+         * scenario 2) passes validation but fails loud at
+         * proof-source init - never a silently wrong stream. */
+        {
+            toy_cart_t mic2 = sig_cart;
+            toy_sig_source_t unused;
+            mic2.sig_spec.device = TOY_SIG_DEVICE_MIC1;
+            mic2.sig_spec.scenario_id = 2u;
+            expect(toy_cart_check_signal(&mic2) == 0 &&
+                   toy_sig_proof_source_init(&mic2, &unused) == -1,
+                   "MIC scenario 2 refused at proof-source init");
+        }
 
         /* An absent source must fail loud WITHOUT calling feed:
          * no samples are invented into a proof. */

@@ -104,11 +104,14 @@ uint64_t toy_sig_param_stream_id(const toy_sig_info_t *info);
  * comparable everywhere. LIVE has no proof run by definition;
  * REPLAY proof bytes are a later parcel. scenario_id is 1 in v1
  * (IMU "desk", MIC 440 Hz tone); new scenarios are new proof
- * vectors, never edits to a pinned one. */
+ * vectors, never edits to a pinned one. Scenario 2 (IMU6
+ * "chest") joined additively in Wave T3; scenario-1 stream
+ * bytes are unchanged by its presence. */
 typedef struct {
     uint32_t device;           /* TOY_SIG_DEVICE_*               */
     uint32_t proof_kind;       /* TOY_SIG_KIND_SYNTHETIC in v1   */
-    uint32_t scenario_id;      /* synthetic scenario, 1 in v1    */
+    uint32_t scenario_id;      /* synthetic scenario: 1 desk/tone,
+                                  2 chest (IMU6 only)            */
     uint32_t sample_rate_hz;   /* rate the cart's dt assumes     */
     uint32_t samples_per_step; /* fixed frames fed before step() */
     uint64_t seed;             /* synthetic proof seed           */
@@ -231,7 +234,20 @@ uint64_t toy_sig_hash_samples(const int16_t *interleaved,
  * (gravity 1 g, tilt amplitude tilt_amp_lsb, az = sqrt(1-A^2)),
  * band-limited tremor on every axis, one decaying tap transient
  * at tap_at. Gyro channels carry tremor only in this prototype
- * (not yet coherent with the accel attitude; see the study). */
+ * (not yet coherent with the accel attitude; see the study).
+ *
+ * Scenario 2 "chest" (Wave T3, same struct, disjoint fields):
+ * device flat on the sternum, screen up - in this frame's
+ * convention (desk az rests at +15864 LSB) gravity rests in
+ * +az at a full 16384 LSB, ax/ay near zero. Breathing ~0.25 Hz
+ * at ~12 mg rides az; a heartbeat doublet (systolic peak
+ * ~5 mg = 82 LSB, diastolic ~40% at +30 samples, integer shape
+ * tables in toy_signal.c) repeats at exactly 75 BPM (period
+ * 4*rate/5 samples = 80 at 100 Hz); small ax/ay spillover;
+ * uniform +-2 LSB quantisation-class noise on every axis.
+ * The seed varies breathing/beat phase and the noise only -
+ * amplitudes, period and shape are the pinned vector. This is
+ * MODELLED seismocardiography magnitudes, not a recording. */
 typedef struct {
     toy_sig_info_t info;
     int32_t tilt_amp_lsb;   /* gravity XY circle radius, LSB      */
@@ -242,9 +258,15 @@ typedef struct {
     int32_t tap_amp_lsb;    /* tap peak on az, LSB                */
     uint32_t tilt_inc;      /* phase increments                   */
     uint32_t tap_inc;
+    /* scenario 2 "chest" parameters (unused by scenario 1) */
+    int32_t breath_amp_lsb; /* breathing amplitude on az, LSB     */
+    uint32_t breath_inc;    /* breathing phase increment          */
+    uint64_t beat_first;    /* sample index of first systolic     */
+    uint32_t beat_period;   /* samples per beat (80 at 100 Hz)    */
     /* running state */
     uint64_t seq;
     uint32_t tilt_phase, tap_phase;
+    uint32_t breath_phase;  /* scenario 2 only                    */
     int32_t tap_env;
     toy_rng_t rng;
     toy_bandnoise_t bn[6];
@@ -255,6 +277,9 @@ typedef struct {
  * against the datasheet when the kits land). */
 void toy_sig_synth_imu_init(toy_sig_synth_imu_t *s, uint64_t seed,
                             uint32_t sample_rate_hz);
+/* Scenario 2 "chest": same scales/rate contract as desk. */
+void toy_sig_synth_imu_chest_init(toy_sig_synth_imu_t *s, uint64_t seed,
+                                  uint32_t sample_rate_hz);
 void toy_sig_synth_imu_next(toy_sig_synth_imu_t *s, int16_t out6[6]);
 
 /* --- synthetic microphone --------------------------------------- */
@@ -331,6 +356,11 @@ typedef struct {
 
 void toy_sig_source_synth_imu(toy_sig_source_t *src, uint64_t seed,
                               uint32_t sample_rate_hz);
+/* Scenario dispatch for IMU6: 1 = desk, 2 = chest. Returns 0 on
+ * success, -1 for a scenario this device cannot generate. */
+int toy_sig_source_synth_imu_scenario(toy_sig_source_t *src, uint64_t seed,
+                                      uint32_t sample_rate_hz,
+                                      uint32_t scenario_id);
 void toy_sig_source_synth_mic(toy_sig_source_t *src, uint64_t seed,
                               uint32_t sample_rate_hz,
                               uint32_t freq0_millihz,

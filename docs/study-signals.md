@@ -629,3 +629,50 @@ wherever a synthetic proof is quoted. Recommend: take SIG-1
 jointly with the input seam, then SIG-2..4 as one proving
 wave, and build the seismometer against the synthetic desk
 stream immediately after.
+
+## Appendix (Wave T3): scenario 2 "chest"
+
+A second IMU6 synthetic scenario, added additively for the
+`heartbeat` cartridge (a seismocardiography *toy* - not a
+medical device, and labelled as such in its render). The
+scenario-1 desk stream bytes are unchanged by its presence
+(signal_proto scenario-1 hash is still pinned); scenario 2 is
+a new proof vector in the sense of section 5, served by
+`toy_sig_synth_imu_chest_init` / `toy_sig_source_synth_imu_scenario`
+in `core/toy_signal.{h,c}` and selected through the unchanged
+descriptor seam (`toy_cart_check_signal` now allows scenario
+{1, 2}; `toy_sig_proof_source_init` dispatches, and refuses
+device/scenario combos with no generator such as MIC
+scenario 2).
+
+Model (integer only, desk-generator style; device flat on the
+sternum, screen up, so in this frame gravity rests in +az at
+16384 LSB and the SCG out-of-plane direction is az):
+
+- breathing ~0.25 Hz at ~12 mg (197 LSB) on az, small
+  fractions spilling into ax/ay;
+- a heartbeat pulse train at exactly 75 BPM (period
+  4*rate/5 samples = 80 at 100 Hz): an SCG-like doublet from
+  integer per-mille shape tables - systolic complex ~12
+  samples wide, peak 82 LSB (~5.0 mg), diastolic bump ~40%
+  (33 LSB) at +30 samples - plus pulse/4 and -pulse/6
+  spillover on ax/ay;
+- uniform +-2 LSB noise on all six axes (a quantisation-class
+  floor, deliberately *below* real sensor noise - see below);
+- the seed varies breathing/beat phase and noise only; the
+  first systolic lands one period in plus seed phase.
+  `toy_sig_info` reports kind/orig SYNTHETIC, scenario_id 2.
+
+The magnitudes are modelled on published seismocardiography
+(chest accelerations order g*1e-3, typical features ~5 mg,
+placement-dependent roughly 1-20 mg) and the QMI8658C
+datasheet noise density (150 ug/sqrt(Hz), ~0.56 mg RMS over a
+1-15 Hz band; 61 ug/LSB at +-2 g/16-bit): the expected
+hardware SNR is workable on paper, but this vector proves the
+*detector chain*, not the physiology or the sensor. What
+remains for real hardware to confirm: placement pressure and
+clothing coupling, actual noise at the chosen ODR/range, the
+real module's axis orientation, and gross-motion behaviour
+(none is modelled here). Per section 7, every run is labelled
+SYNTHETIC CHEST from hashed state, and NO SIG before the
+first feed.

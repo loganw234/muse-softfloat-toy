@@ -289,6 +289,64 @@ int main(int argc, char **argv)
     expect(h_chirp != h_tone1 && zc_chirp > zc_tone1 + 200u,
            "chirp sweeps upward (more crossings than the fixed tone)");
 
+    /* Scenario 2 "chest" (additive, Wave T3): modelled SCG
+     * magnitudes on az at rest +1 g. Regeneration must be exact,
+     * the stream must differ from scenario 1, az must rest near
+     * 16384 with only mg-class excursions (no desk tap here). */
+    printf("== synthetic IMU scenario 2 (chest): 40 s at %u Hz\n", IMU_RATE);
+    {
+        enum { CHEST_N = 4000 };
+        static int16_t ca[CHEST_N * 6], cb[CHEST_N * 6];
+        uint64_t hch[2];
+        for (int run = 0; run < 2; run++) {
+            toy_sig_source_t src;
+            int16_t *dst = run ? cb : ca;
+            if (toy_sig_source_synth_imu_scenario(&src, UINT64_C(0xbea75),
+                                                  IMU_RATE, 2u) != 0) {
+                fprintf(stderr, "chest source failed\n");
+                return 2;
+            }
+            if (run == 0)
+                printf("  scenario 2 stream id %016llx (scenario %u)\n",
+                       (unsigned long long)src.info.stream_id,
+                       src.info.scenario_id);
+            for (uint32_t i = 0; i < CHEST_N; i++) {
+                uint32_t flags2 = 0;
+                if (toy_sig_poll(&src, NULL, 0, dst + (size_t)i * 6u, 1,
+                                 &flags2) != 1u || flags2 != 0u) {
+                    fprintf(stderr, "chest poll failed at %u\n", i);
+                    return 2;
+                }
+            }
+            hch[run] = toy_sig_hash_samples(dst, CHEST_N, 6u);
+        }
+        printf("  chest run A hash %016llx run B hash %016llx\n",
+               (unsigned long long)hch[0], (unsigned long long)hch[1]);
+        expect(hch[0] == hch[1] && hch[0] != ha,
+               "chest regenerates identically and differs from desk");
+        int64_t az_sum = 0;
+        int32_t az_dev_max = 0, ax_abs_max = 0;
+        uint32_t over60 = 0;
+        for (uint32_t i = 0; i < CHEST_N; i++) {
+            int32_t ax = ca[(size_t)i * 6u];
+            int32_t az = ca[(size_t)i * 6u + 2u];
+            int32_t dev = az - 16384;
+            az_sum += az;
+            if (dev < 0) dev = -dev;
+            if (dev > az_dev_max) az_dev_max = dev;
+            if (az - 16384 > 60) over60++;
+            if (ax < 0) ax = -ax;
+            if (ax > ax_abs_max) ax_abs_max = ax;
+        }
+        int64_t az_mean = az_sum / CHEST_N;
+        printf("  chest az mean %lld max|dev| %d LSB, ax max %d LSB, "
+               "samples >60 LSB over rest: %u\n",
+               (long long)az_mean, az_dev_max, ax_abs_max, over60);
+        expect(az_mean > 16200 && az_mean < 16600 &&
+               az_dev_max > 200 && az_dev_max < 450 && over60 > 100u,
+               "az rests at +1 g with breathing+pulse mg excursions");
+    }
+
     printf("signal_proto: %s (%d failure%s)\n",
            failures ? "FAIL" : "PASS", failures, failures == 1 ? "" : "s");
     free(file_bytes);
