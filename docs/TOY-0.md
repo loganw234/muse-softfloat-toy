@@ -116,6 +116,13 @@ framebuffer contract. When the kit arrives, the emulator stays as
 the regression surface for layout (what fits a circle, what text
 survives 240 px).
 
+`site/` is the permanent browser form of the emulator: the same
+registered cartridges compiled to WebAssembly and stepped live,
+rendered at both 240 and 360 from one state. Its deployment build
+runs every cartridge's proof stream under Node and compares the
+hashes with values pinned from the native/board runs, so a website
+build that drifts from the hardware maths fails before it deploys.
+
 ## 6. Licensing posture
 
 - This repo: MIT, Copyright (c) 2026 Logan W. (to settle at first

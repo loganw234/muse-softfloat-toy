@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Front door. Budgets: host | check | board
-#   host  - build core+emulator, run both cartridges, render sheets
+# Front door. Budgets: host | check | site | board
+#   host  - build core+emulator, run all cartridges, render sheets
 #   check - determinism: same hash streams twice (host), byte-diffed
+#   site  - build live WebAssembly emulator and verify pinned hashes
 #   board - delegate to board/run_toy.sh (flash + read + compare)
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -23,25 +24,21 @@ budget="${1:-host}"
 case "$budget" in
 host)
     build_emu
-    for cart in fig8 pendulum; do
-        out="$BUILD/emu/$cart-240"
-        mkdir -p "$out"
-        # pendulum needs more sim-time per frame for the 1-ulp split to show
-        spf=40; [ "$cart" = pendulum ] && spf=500
-        "$BUILD/emu/toy_emu" frames "$cart" 240 "$spf" 8 "$out" > "$out/hashes.txt"
-        "$PY" "$ROOT/emu/sheet.py" "$out" "$out/sheet.png" 4 >/dev/null
-        echo "== $cart (240)"; cat "$out/hashes.txt"
+    for cart in $("$BUILD/emu/toy_emu" list); do
+        for size in 240 360; do
+            out="$BUILD/emu/$cart-$size"
+            mkdir -p "$out"
+            # 0 asks the cartridge for its live-demo pacing.
+            "$BUILD/emu/toy_emu" frames "$cart" "$size" 0 40 "$out" > "$out/hashes.txt"
+            "$PY" "$ROOT/emu/sheet.py" "$out" "$out/sheet.png" 8 >/dev/null
+            echo "== $cart ($size)"; cat "$out/hashes.txt"
+        done
     done
-    out="$BUILD/emu/fig8-360"
-    mkdir -p "$out"
-    "$BUILD/emu/toy_emu" frames fig8 360 40 4 "$out" > "$out/hashes.txt"
-    "$PY" "$ROOT/emu/sheet.py" "$out" "$out/sheet.png" 4 >/dev/null
-    echo "== fig8 (360)"; cat "$out/hashes.txt"
     echo "budget host: PASS (sheets under build/emu/)"
     ;;
 check)
     build_emu
-    for cart in fig8 pendulum; do
+    for cart in $("$BUILD/emu/toy_emu" list); do
         "$BUILD/emu/toy_emu" run "$cart" 10000 1000 > "$BUILD/emu/$cart-run-a.txt"
         "$BUILD/emu/toy_emu" run "$cart" 10000 1000 > "$BUILD/emu/$cart-run-b.txt"
         cmp "$BUILD/emu/$cart-run-a.txt" "$BUILD/emu/$cart-run-b.txt"
@@ -49,11 +46,14 @@ check)
     done
     echo "budget check: PASS"
     ;;
+site)
+    "$PY" "$ROOT/site/build.py" --cc "${TOY_CC:-zig cc}"
+    ;;
 board)
     exec bash "$ROOT/board/run_toy.sh"
     ;;
 *)
-    echo "usage: tools/run.sh [host|check|board]" >&2
+    echo "usage: tools/run.sh [host|check|site|board]" >&2
     exit 2
     ;;
 esac

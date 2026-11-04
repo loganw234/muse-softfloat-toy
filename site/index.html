@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>muse-softfloat-toy — live screen emulator</title>
+<meta name="description" content="Exact RP2040/RP2350 desk-toy simulations running live in WebAssembly.">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main>
+  <header>
+    <p class="eyebrow">MUSE-SOFTFLOAT-TOY</p>
+    <h1>A deterministic gallery, running live.</h1>
+    <p class="lede">The simulations below are not recordings. Your browser is stepping the same C simulation core that runs on the RP2040, rendered at both candidate glass sizes. The ticking state hash is identical here, on a desktop build and on the Pico.</p>
+  </header>
+
+  <section class="controls" aria-label="Simulation controls">
+    <label>Cartridge
+      <select id="cart"></select>
+    </label>
+    <button id="play" type="button" class="on">Pause</button>
+    <button id="reset" type="button">Reset</button>
+    <label class="speed">Speed
+      <input id="speed" type="range" min="10" max="300" value="100">
+      <span id="speed-value">1.0×</span>
+    </label>
+    <label>Displays
+      <select id="displays">
+        <option value="both" selected>Both kits</option>
+        <option value="240">RP2040 · 240</option>
+        <option value="360">RP2350 · 360</option>
+      </select>
+    </label>
+  </section>
+
+  <p id="status" class="status">Loading WebAssembly…</p>
+  <p id="blurb" class="blurb"></p>
+
+  <section class="displays" aria-label="Simulated displays">
+    <figure id="panel-240">
+      <canvas id="display-240" width="240" height="240" aria-label="Simulated 240 by 240 RP2040 display"></canvas>
+      <figcaption>RP2040 kit · 240 × 240 · 1.28″</figcaption>
+      <p class="hash" id="hash-240">state —</p>
+    </figure>
+    <figure id="panel-360">
+      <canvas id="display-360" width="360" height="360" aria-label="Simulated 360 by 360 RP2350 display"></canvas>
+      <figcaption>RP2350 kit · 360 × 360 · 1.85″</figcaption>
+      <p class="hash" id="hash-360">state —</p>
+    </figure>
+  </section>
+
+  <section class="notes">
+    <h2>What you are seeing</h2>
+    <p>One simulation state is rendered twice, once for each display size. Rendering never feeds back into the state. All floating-point in the simulation path goes through <a href="https://github.com/loganw234/muse-softfloat">muse-softfloat</a>; the browser build is the same core compiled to WebAssembly and is checked against pinned native/board hashes during deployment.</p>
+    <p>The physical kits add touch, IMU, clock, battery and storage. This page is the screen emulator used while those drivers are built.</p>
+  </section>
+
+  <footer>
+    <a href="https://github.com/loganw234/muse-softfloat-toy">Toy repository</a>
+    <span>·</span>
+    <a href="https://github.com/loganw234/muse-softfloat">Library repository</a>
+    <span>·</span>
+    <span>MIT</span>
+  </footer>
+</main>
+<script type="module" src="app.js"></script>
+</body>
+</html>

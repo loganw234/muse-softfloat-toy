@@ -9,7 +9,7 @@
  */
 #include "toy_cart.h"
 #include "toy_math.h"
-#include <string.h>
+#include "toy_util.h"
 
 #define PTRAIL 220
 
@@ -74,7 +74,7 @@ static void tips(const pend_state *s, int inst, f64 *x1, f64 *y1, f64 *x2, f64 *
 static void pend_reset(void *st_)
 {
     pend_state *s = (pend_state *)st_;
-    memset(s, 0, sizeof *s);
+    toy_memset(s, 0, sizeof *s);
     s->th[0][0] = f64_dec("2.0");
     s->th[0][1] = f64_dec("2.4");
     s->th[1][0] = f64_next_up(s->th[0][0]); /* one ulp later, chaos */
@@ -104,7 +104,7 @@ static void pend_step(void *st_)
     }
 }
 
-static double d64(f64 a) { double d; memcpy(&d, &a, sizeof d); return d; }
+static double d64(f64 a) { union { f64 u; double d; } v; v.u = a; return v.d; }
 
 static void pend_render(const void *st_, toy_fb_t *fb)
 {
@@ -144,5 +144,5 @@ static void pend_render(const void *st_, toy_fb_t *fb)
 const toy_cart_t toy_cart_pendulum = {
     "pendulum", "Twins, 1 ulp apart",
     "Two double pendulums differing by one ulp. They agree, then they do not.",
-    sizeof(pend_state), pend_reset, pend_step, pend_render
+    sizeof(pend_state), 30, 1000, 250, pend_reset, pend_step, pend_render
 };

@@ -1,6 +1,6 @@
 /* toy_carts.c - cartridge registry and the state hash. */
 #include "toy_cart.h"
-#include <string.h>
+#include "toy_util.h"
 
 const toy_cart_t *const toy_carts[] = {
     &toy_cart_fig8,
@@ -11,7 +11,7 @@ const int toy_cart_count = (int)(sizeof toy_carts / sizeof toy_carts[0]);
 const toy_cart_t *toy_cart_by_name(const char *name)
 {
     for (int i = 0; i < toy_cart_count; i++)
-        if (strcmp(toy_carts[i]->name, name) == 0) return toy_carts[i];
+        if (toy_strcmp(toy_carts[i]->name, name) == 0) return toy_carts[i];
     return 0;
 }
 

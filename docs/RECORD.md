@@ -24,3 +24,20 @@ firmware now waits for USB attach before printing. An RP2350
 1.85C kit (360x360, RTC, microphone, microSD) is under
 consideration as the primary target; the core was written
 resolution- and chip-independent so TOY-0 now dual-targets.
+
+## 2026-11-03 - parcel-ready contract and live WebAssembly emulator
+
+The cartridge descriptor now carries demo pacing and proof-run
+configuration, with `TOY_MAX_STATE_SIZE` enforced by hosts, so a
+new cartridge enters the native emulator, board proof and WASM
+site by registration alone. `docs/CARTRIDGES.md` records the
+state/render/determinism rules and the seams that still need a
+study before parcels use them (input/settings, checkpoint
+versioning, device sensors/audio).
+
+`site/` is the permanent browser emulator: the registered C
+cartridges compiled to WebAssembly and stepped live, rendered
+from one state at both 240x240 and 360x360. URL parameters
+`?cart=`, `?steps=`, `?pause=1` deep-link an exact deterministic
+state. The WASM build verifies every proof hash against values
+pinned from the native/board runs before deployment.

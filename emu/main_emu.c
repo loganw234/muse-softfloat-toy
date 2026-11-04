@@ -46,11 +46,33 @@ static int write_ppm(const char *path, const toy_fb_t *fb)
 
 int main(int argc, char **argv)
 {
+    if (argc >= 2 && strcmp(argv[1], "list") == 0 && argc == 2) {
+        for (int i = 0; i < toy_cart_count; i++)
+            printf("%s\n", toy_carts[i]->name);
+        return 0;
+    }
+    if (argc >= 2 && strcmp(argv[1], "proof") == 0 && argc == 3) {
+        const toy_cart_t *cart = toy_cart_by_name(argv[2]);
+        if (!cart) { fprintf(stderr, "unknown cart %s\n", argv[2]); return 2; }
+        void *st = xcalloc(cart->state_size);
+        cart->reset(st);
+        printf("TOY-RUN cart=%s state_size=%zu hash=fnv1a64\n", cart->name, cart->state_size);
+        for (uint32_t s = 1; s <= cart->proof_steps; s++) {
+            cart->step(st);
+            if (cart->proof_report_every && (s % cart->proof_report_every) == 0)
+                printf("step %u hash %016llx\n", s,
+                       (unsigned long long)toy_hash_state(st, cart->state_size));
+        }
+        printf("TOY-DONE steps %u hash %016llx\n", cart->proof_steps,
+               (unsigned long long)toy_hash_state(st, cart->state_size));
+        return 0;
+    }
     if (argc >= 2 && strcmp(argv[1], "frames") == 0 && argc == 7) {
         const toy_cart_t *cart = toy_cart_by_name(argv[2]);
         if (!cart) { fprintf(stderr, "unknown cart %s\n", argv[2]); return 2; }
         int size = atoi(argv[3]);
         long spf = atol(argv[4]);
+        if (spf == 0) spf = (long)cart->demo_steps_per_frame;
         long frames = atol(argv[5]);
         const char *outdir = argv[6];
         void *st = xcalloc(cart->state_size);
@@ -89,7 +111,9 @@ int main(int argc, char **argv)
     }
     fprintf(stderr,
         "usage:\n"
-        "  toy_emu frames <cart> <size> <steps-per-frame> <frames> <outdir>\n"
+        "  toy_emu list\n"
+        "  toy_emu proof <cart>\n"
+        "  toy_emu frames <cart> <size> <steps-per-frame|0=demo> <frames> <outdir>\n"
         "  toy_emu run <cart> <total-steps> <report-every>\n"
         "carts:");
     for (int i = 0; i < toy_cart_count; i++) fprintf(stderr, " %s", toy_carts[i]->name);

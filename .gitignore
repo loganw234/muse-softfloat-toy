@@ -1,2 +1,4 @@
 build/
 *.ppm
+site/toy.wasm
+_site/

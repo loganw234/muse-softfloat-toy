@@ -16,7 +16,7 @@
 #define TOY_GIT_HEAD "unknown"
 #endif
 
-static unsigned char state_buf[16384];
+static _Alignas(8) unsigned char state_buf[TOY_MAX_STATE_SIZE];
 
 static void run_cart(const toy_cart_t *cart, long total, long every)
 {
@@ -52,8 +52,17 @@ int main(void)
     pico_get_unique_board_id_string(idstr, sizeof idstr);
     printf("TOY-BOARD git %s serial %s clk_hz %lu\n",
            TOY_GIT_HEAD, idstr, (unsigned long)clock_get_hz(clk_sys));
-    run_cart(&toy_cart_fig8, 2000, 500);
-    run_cart(&toy_cart_pendulum, 1000, 250);
+    for (int i = 0; i < toy_cart_count; i++) {
+        const toy_cart_t *cart = toy_carts[i];
+        if (cart->state_size > sizeof state_buf) {
+            printf("TOY-SKIP cart=%s state_size=%u exceeds %u\n",
+                   cart->name, (unsigned)cart->state_size,
+                   (unsigned)sizeof state_buf);
+            continue;
+        }
+        run_cart(cart, (long)cart->proof_steps,
+                 (long)cart->proof_report_every);
+    }
     printf("TOY-ALL-DONE\n");
     for (;;) { gpio_xor_mask(1u << PICO_DEFAULT_LED_PIN); sleep_ms(500); }
 }

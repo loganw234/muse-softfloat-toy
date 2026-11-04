@@ -17,6 +17,7 @@ Private during development. The design of record is
 |---|---|
 | `core/` | the deterministic sim core: framebuffer contract, cartridge interface, cartridges |
 | `emu/` | host screen emulator: renders the same framebuffer to PNG frames, prints state hashes |
+| `site/` | permanent live browser emulator: the sim core compiled to WebAssembly, both glass sizes |
 | `board/` | RP2040 firmware (core-only hash runner today; display/input when the kit arrives) |
 | `libs/muse-softfloat/` | the library, pinned submodule at `v1.0.0` — never edited from here |
 | `tools/run.sh` | the front door: `host`, `check`, `board` budgets |
@@ -28,6 +29,7 @@ Private during development. The design of record is
 git submodule update --init
 bash tools/run.sh host    # build + run cartridges, render frames to build/emu/
 bash tools/run.sh check   # determinism: two runs, identical state hashes
+bash tools/run.sh site    # build + verify the live WebAssembly emulator
 bash tools/run.sh board   # flash the genuine Pico, compare state hashes host == board
 ```
 

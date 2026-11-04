@@ -50,8 +50,10 @@ cat "$BOARD_BUILD/board-out.log"
 # Host side of the gate: identical step/hash lines, in order.
 bash tools/run.sh host >/dev/null || fail "host build"
 EMU="$ROOT/build/emu/toy_emu"
-{ "$EMU" run fig8 2000 500; "$EMU" run pendulum 1000 250; } \
-    | grep -E '^(TOY-RUN|step|TOY-DONE)' > "$BOARD_BUILD/host-lines.txt"
+: > "$BOARD_BUILD/host-lines.txt"
+for cart in $("$EMU" list); do
+    "$EMU" proof "$cart" >> "$BOARD_BUILD/host-lines.txt"
+done
 grep -E '^(TOY-RUN|step|TOY-DONE)' "$BOARD_BUILD/board-out.log" > "$BOARD_BUILD/board-lines.txt"
 if diff -u "$BOARD_BUILD/host-lines.txt" "$BOARD_BUILD/board-lines.txt"; then
     echo "board budget: PASS (host == board at every reported step)"

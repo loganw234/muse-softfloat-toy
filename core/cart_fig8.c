@@ -14,7 +14,7 @@
  */
 #include "toy_cart.h"
 #include "toy_math.h"
-#include <string.h>
+#include "toy_util.h"
 
 #define TRAIL 288
 
@@ -59,7 +59,7 @@ static void leapfrog(fig8_state *s, f64 h)
 static void fig8_reset(void *st_)
 {
     fig8_state *s = (fig8_state *)st_;
-    memset(s, 0, sizeof *s);
+    toy_memset(s, 0, sizeof *s);
     f64 px = f64_dec("0.97000436"), py = f64_dec("-0.24308753");
     f64 vx = f64_dec("0.93240737"), vy = f64_dec("0.86473146");
     s->x[0][0] = px;            s->x[0][1] = py;
@@ -100,7 +100,7 @@ static void fig8_step(void *st_)
 }
 
 /* Display conversion only (never feeds state). */
-static double d64(f64 a) { double d; memcpy(&d, &a, sizeof d); return d; }
+static double d64(f64 a) { union { f64 u; double d; } v; v.u = a; return v.d; }
 
 static void fig8_render(const void *st_, toy_fb_t *fb)
 {
@@ -135,5 +135,5 @@ static void fig8_render(const void *st_, toy_fb_t *fb)
 const toy_cart_t toy_cart_fig8 = {
     "fig8", "Eternal Return",
     "Three equal masses chase one curve forever. Watch the return.",
-    sizeof(fig8_state), fig8_reset, fig8_step, fig8_render
+    sizeof(fig8_state), 4, 2000, 500, fig8_reset, fig8_step, fig8_render
 };

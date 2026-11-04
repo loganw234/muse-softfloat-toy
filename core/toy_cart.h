@@ -14,11 +14,21 @@
 #include <stdint.h>
 #include "toy_fb.h"
 
+/* Every host (emulator, board, WASM) allocates this much state.
+ * A cartridge whose state exceeds it does not load anywhere. */
+#define TOY_MAX_STATE_SIZE 65536u
+
 typedef struct {
     const char *name;   /* short id, e.g. "fig8" */
     const char *title;  /* display title */
     const char *blurb;  /* one line: what to notice */
     size_t state_size;
+    /* Live-demo pacing and the standard cross-platform proof run.
+     * Keeping these in the descriptor makes a new cartridge enter
+     * every runner without editing emulator, board or site code. */
+    uint32_t demo_steps_per_frame;
+    uint32_t proof_steps;
+    uint32_t proof_report_every;
     void (*reset)(void *st);
     void (*step)(void *st);
     void (*render)(const void *st, toy_fb_t *fb);
