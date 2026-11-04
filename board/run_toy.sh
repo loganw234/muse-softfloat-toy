@@ -51,7 +51,7 @@ cat "$BOARD_BUILD/board-out.log"
 bash tools/run.sh host >/dev/null || fail "host build"
 EMU="$ROOT/build/emu/toy_emu"
 : > "$BOARD_BUILD/host-lines.txt"
-for cart in $("$EMU" list); do
+for cart in $("$EMU" list | tr -d '\r'); do
     "$EMU" proof "$cart" >> "$BOARD_BUILD/host-lines.txt"
 done
 grep -E '^(TOY-RUN|step|TOY-DONE)' "$BOARD_BUILD/board-out.log" > "$BOARD_BUILD/board-lines.txt"

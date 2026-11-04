@@ -24,7 +24,7 @@ budget="${1:-host}"
 case "$budget" in
 host)
     build_emu
-    for cart in $("$BUILD/emu/toy_emu" list); do
+    for cart in $("$BUILD/emu/toy_emu" list | tr -d '\r'); do
         for size in 240 360; do
             out="$BUILD/emu/$cart-$size"
             mkdir -p "$out"
@@ -38,7 +38,7 @@ host)
     ;;
 check)
     build_emu
-    for cart in $("$BUILD/emu/toy_emu" list); do
+    for cart in $("$BUILD/emu/toy_emu" list | tr -d '\r'); do
         "$BUILD/emu/toy_emu" run "$cart" 10000 1000 > "$BUILD/emu/$cart-run-a.txt"
         "$BUILD/emu/toy_emu" run "$cart" 10000 1000 > "$BUILD/emu/$cart-run-b.txt"
         cmp "$BUILD/emu/$cart-run-a.txt" "$BUILD/emu/$cart-run-b.txt"
