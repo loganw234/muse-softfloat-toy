@@ -9,3 +9,4 @@
 {"parcel": "toy1-lorenz", "parcel_commit": "feb396134ebf227df2c88f82508f8d4a6bc87a8d", "copy_head": "f97b2136861720bb83c8892bc6f4322d67ccd5da", "plants": 5, "key_sha256": "7694dbbe7a8724378c76be6882a1fd3095e7c570d2d61f0df9c1caee55050d1c", "checked_by": "lead-merge", "status": "dispatched"}
 {"parcel": "toy1-lorenz", "status": "verdict", "caught": 5, "plants": 5, "extra_findings": [], "verifier_report": "scratch/toy1/verify-lorenz.md", "checked_by": "lead-merge"}
 {"parcel": "toy1-intervallens", "parcel_commit": "196d78f3f964f20e13d02641c028b26e51ab9186", "copy_head": "43bf950dd99d5e4f72c90289fa4cbd9e69fe3b10", "plants": 5, "key_sha256": "a8a6440a9c889fd9f738d3183e5717914775f3039af93a947a87d094fcac37ea", "checked_by": "lead-merge", "status": "dispatched"}
+{"parcel": "toy1-intervallens", "status": "verdict", "caught": 5, "plants": 5, "extra_findings": [], "verifier_report": "scratch/toy1/verify-intervallens.md", "checked_by": "lead-merge"}
