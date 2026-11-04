@@ -12,7 +12,7 @@
   <header>
     <p class="eyebrow">MUSE-SOFTFLOAT-TOY</p>
     <h1>A deterministic gallery, running live.</h1>
-    <p class="lede">The simulations below are not recordings. Your browser is stepping the same C simulation core that runs on the RP2040, rendered at both candidate glass sizes. The ticking state hash is identical here, on a desktop build and on the Pico.</p>
+    <p class="lede">The simulation below is not a recording. Your browser is stepping the same C simulation core that runs on the RP2040, shown on a mock device: pick a candidate glass, turn it, tilt it, change its settings. The ticking state hash is identical here, on a desktop build and on the Pico — panel size and pacing never touch it.</p>
   </header>
 
   <section class="controls" aria-label="Simulation controls">
@@ -25,12 +25,16 @@
       <input id="speed" type="range" min="10" max="300" value="100">
       <span id="speed-value">1.0×</span>
     </label>
-    <label>Displays
-      <select id="displays">
-        <option value="both" selected>Both kits</option>
-        <option value="240">RP2040 · 240</option>
-        <option value="360">RP2350 · 360</option>
+    <label>Panel
+      <select id="panel">
+        <option value="240">240 · 1.28″ RP2040</option>
+        <option value="360" selected>360 · 1.85″</option>
+        <option value="466">466 · 1.75″ AMOLED</option>
+        <option value="480">480 · 1.46″</option>
       </select>
+    </label>
+    <label>Custom px
+      <input id="panel-custom" type="number" min="64" max="1024" step="1" value="360">
     </label>
     <button id="set-clock" type="button">Set clock</button>
     <span id="clock">clock unset</span>
@@ -39,23 +43,56 @@
   <p id="status" class="status">Loading WebAssembly…</p>
   <p id="blurb" class="blurb"></p>
 
-  <section class="displays" aria-label="Simulated displays">
-    <figure id="panel-240">
-      <canvas id="display-240" width="240" height="240" aria-label="Simulated 240 by 240 RP2040 display"></canvas>
-      <figcaption>RP2040 kit · 240 × 240 · 1.28″</figcaption>
-      <p class="hash" id="hash-240">state —</p>
+  <section class="mock" aria-label="Mock device">
+    <figure class="device-fig">
+      <div id="device" class="device" title="Drag the bezel ring or scroll to turn the dial">
+        <canvas id="display" width="360" height="360" aria-label="Simulated round display"></canvas>
+      </div>
+      <figcaption id="panel-caption">Mock device · 360 × 360</figcaption>
+      <p class="hash" id="hash">state —</p>
+      <p class="perf" id="perf">browser timing —</p>
+      <p class="hint">Glass: pointer. Bezel ring: drag to turn. Wheel over device: turn. Switching panels never resets — watch the hash.</p>
     </figure>
-    <figure id="panel-360">
-      <canvas id="display-360" width="360" height="360" aria-label="Simulated 360 by 360 RP2350 display"></canvas>
-      <figcaption>RP2350 kit · 360 × 360 · 1.85″</figcaption>
-      <p class="hash" id="hash-360">state —</p>
-    </figure>
+
+    <div class="side">
+      <section class="card" aria-label="Cartridge settings">
+        <h2>Settings</h2>
+        <div id="params"></div>
+        <p class="note">Settings reach the simulation only as quantised events at step boundaries. Defaults are untouched until you move a control.</p>
+      </section>
+
+      <section class="card" id="dial-card" aria-label="Dial">
+        <h2>Dial</h2>
+        <p class="readout" id="dial-readout">dial 0 milliturns</p>
+        <p class="note">Wheel: 4800 px of travel = 1 turn. Bezel drag: angle around the centre. Clockwise is positive. Emitted as integer milliturns only.</p>
+      </section>
+
+      <section class="card" id="tilt-card" aria-label="Tilt pad">
+        <h2>Tilt</h2>
+        <div id="tilt-pad" class="tilt-pad" role="slider" aria-label="Tilt pad: drag to set tilt in milli-g">
+          <div id="tilt-knob" class="tilt-knob"></div>
+        </div>
+        <p class="readout" id="tilt-readout">tilt x 0 · y 0 milli-g</p>
+        <button id="tilt-level" type="button">Level</button>
+        <p class="note">Knob position = direction things fall, in milli-g (x right, y down on screen; the wire's display space). Sent on change only.</p>
+      </section>
+
+      <section class="card" aria-label="Session">
+        <h2>Session</h2>
+        <p class="readout" id="session-readout">no live events yet</p>
+        <div class="row">
+          <button id="download-session" type="button">Download session</button>
+          <button id="copy-hash" type="button">Copy hash &amp; steps</button>
+        </div>
+        <p class="note">Every live event is recorded with the step it applied at (TOYSESSION1). The emulator replays a downloaded session bit-exactly.</p>
+      </section>
+    </div>
   </section>
 
   <section class="notes">
     <h2>What you are seeing</h2>
-    <p>One simulation state is rendered twice, once for each display size. Rendering never feeds back into the state. All floating-point in the simulation path goes through <a href="https://github.com/loganw234/muse-softfloat">muse-softfloat</a>; the browser build is the same core compiled to WebAssembly and is checked against pinned native/board hashes during deployment.</p>
-    <p>The physical kits add touch, IMU, clock, battery and storage. This page is the screen emulator used while those drivers are built.</p>
+    <p>One simulation state, one mock device. The panel is presentation only: changing its size re-renders the same state at a new pixel count and cannot move the hash. All floating-point in the simulation path goes through <a href="https://github.com/loganw234/muse-softfloat">muse-softfloat</a>; the browser build is the same core compiled to WebAssembly and is checked against pinned native/board hashes during deployment.</p>
+    <p>This page rehearses driver-UX decisions for the physical kits — touch, IMU tilt, turn-the-device dial, settings — as a UI driver and timing model over the unchanged core. It does not simulate panel hardware, and its browser timings say nothing about board rates. While a cartridge listens to sensors, this page still feeds it the same synthetic proof stream as every other runner.</p>
   </section>
 
   <footer>
