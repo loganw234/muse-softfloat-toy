@@ -21,6 +21,7 @@ const toy_cart_t *const toy_carts[] = {
     &toy_cart_gpend,
     &toy_cart_seismo,
     &toy_cart_attitude,
+    &toy_cart_synspec,
 };
 const int toy_cart_count = (int)(sizeof toy_carts / sizeof toy_carts[0]);
 
