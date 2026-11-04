@@ -184,3 +184,16 @@ twelve deterministic cartridges on the live site and on the
 genuine Pico; Wave T2 (interactive/sensor cartridges on the
 input/signals seams, time banking, checkpointing, spectra on
 toy_fft) is designed and waiting on the display kits.
+
+## Wave T2 opens (2026-11-04)
+
+Owner decisions in `docs/WAVE-T2.md`: RP2350 is the primary
+target, always-plugged power, manual time setting,
+touchscreen-only interaction plus IMU motion (including
+turn-the-device as a dial). First landing: `orbitspec`
+(planted verification 5/5; check/WASM/board PASS with hashes
+identical to the parcel report). It spectra the figure-8's
+body-0 radius — coherently sampled, dominant bin 17 with the
+harmonic ladder, confirmed against an independent pipeline —
+and is the first cartridge to run `toy_fft` on the Pico
+firmware itself.
