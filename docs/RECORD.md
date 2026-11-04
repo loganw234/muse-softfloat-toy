@@ -99,3 +99,12 @@ the enclosure), then check/WASM/board PASS with lead-pinned
 hashes identical to the parcel report. On-device tallies match
 host: 1852 certified-in / 1852 certified-out / 296 uncertain,
 zero containment violations over the proof.
+
+`pendwave` landed next: planted verification 5/5, then
+check/WASM/board PASS with lead-pinned hashes identical to
+the parcel report; the 3000-step recurrence hash matches
+across proof, check, and sheet streams on every target. Note:
+its demo pacing (75 steps/frame) is a deliberate time-lapse so
+a sheet spans one recurrence; whether an RP2040 sustains that
+live at 30 fps is unmeasured — the board gate proves the proof
+stream, not live pacing. Revisit at display-layer time.
