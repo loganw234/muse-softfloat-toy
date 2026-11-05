@@ -287,3 +287,35 @@ signal-fed, one dial-tuned - bit-identical across host,
 browser, and Pico. What remains is hardware: the RP2350
 kit (display/touch/IMU drivers, live sources, on-device
 RP2350 proof) when it arrives.
+
+## Web mock device + heartbeat land (2026-11-04)
+
+The live site is now a mock device for driver-UX rehearsal
+while the RP2350 kit is in transit: runtime panel presets
+(240/360/466/480 + custom px, size is presentation only -
+the state hash never moves), settings controls generated
+from the carts' own param tables, wheel/rim-drag dial and
+tilt-pad producers feeding the same event seam as the
+future hardware, an honest browser-only perf readout, and
+TOYSESSION1 session export. The companion emu session mode
+replays an exported log natively and was delta-proven
+end-to-end: a browser-exported synspec session replays to
+the browser's own final hash f3f0a801. (The two parcels
+initially implemented opposite session step conventions;
+the normative 1-based proof-step stamp was adopted and the
+reconciliation is in the record.)
+
+Heartbeat adds synthetic scenario 2 "chest" and a
+seismocardiography toy: literature-magnitude modelling
+(~5 mg systolic features vs ~0.56 mg paper band noise)
+with the detector exact against the model (49/49 beats,
+75 BPM, no double-fires; marginal at 2 mg, blind at 1 mg).
+Every number there is modelled - a real chest confirms or
+refutes it when the kit arrives, and the cart says
+TOY NOT MEDICAL on every frame.
+
+All three parcels planted-copy verified 5/5; final
+20-cartridge board gate PASSes host == board at every
+reported step, heartbeat's chest stream generated on the
+Pico itself (stream f51502b5). Gallery: 20 cartridges,
+one core, three platforms, one hash.
