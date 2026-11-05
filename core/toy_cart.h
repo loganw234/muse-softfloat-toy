@@ -354,5 +354,40 @@ static inline int toy_feed_step(const toy_cart_t *cart, void *st,
     return 0;
 }
 
+/* Bytes-carrying twin of toy_feed_step, for REPLAY sources:
+ * toy_feed_step polls with NULL bytes, which synthetic sources
+ * never read but a replay source cannot satisfy at all (its
+ * cursor holds offsets only; the host owns the byte buffer,
+ * core/toy_signal.h). This helper is the same proof-strict
+ * contract - same spec checks, same return codes, feed()
+ * still not called on error - with the buffer threaded to
+ * toy_sig_poll. It exists additively so every synthetic proof
+ * path keeps calling toy_feed_step untouched; a runner with
+ * replay bytes calls this instead. For a synthetic source the
+ * bytes are ignored by the poll and the two helpers agree. */
+static inline int toy_feed_step_bytes(const toy_cart_t *cart, void *st,
+                                      toy_sig_source_t *src,
+                                      const uint8_t *replay_bytes,
+                                      size_t replay_len,
+                                      int16_t *frame,
+                                      uint32_t frame_cap_values)
+{
+    const toy_sig_spec_t *spec = &cart->sig_spec;
+    uint32_t channels, flags = 0, got;
+    if (!cart->feed) return 0;
+    if (!src || !frame) return 1;
+    channels = toy_sig_device_channels(spec->device);
+    if (channels == 0u || src->info.device != spec->device ||
+        src->info.channels != channels ||
+        src->info.sample_rate_hz != spec->sample_rate_hz) return 1;
+    if ((uint64_t)spec->samples_per_step * channels >
+        (uint64_t)frame_cap_values) return 3;
+    got = toy_sig_poll(src, replay_bytes, replay_len, frame,
+                       spec->samples_per_step, &flags);
+    if (got != spec->samples_per_step || flags != 0u) return 2;
+    cart->feed(st, frame, got, channels, &src->info, flags);
+    return 0;
+}
+
 #endif
 
