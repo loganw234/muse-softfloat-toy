@@ -75,3 +75,4 @@
 {"parcel": "toy4-feedckpt", "status": "verdict", "caught": 5, "plants": 5, "extra_findings": ["non-feed emu save/load never applied proof script (pre-existing, not parcel scope)"], "verifier_report": "scratch/toy2/verify-feedckpt.md", "checked_by": "lead-merge"}
 {"parcel": "toy4-pond", "status": "verdict", "caught": 5, "plants": 5, "extra_findings": [], "verifier_report": "scratch/toy2/verify-pond.md", "checked_by": "lead-merge"}
 {"parcel": "toy4-shepherd", "parcel_commit": "ae3654b8643fa8bc2eaa529423411d943bbf7c98", "copy_head": "053b51d3fd3c24f05e0aae006b75715080c58037", "plants": 5, "key_sha256": "cf5b3b2d73fabd757d89076890807c97b7109a7d4239d111e8e1a0241d063845", "checked_by": "lead-merge", "status": "dispatched"}
+{"parcel": "toy4-shepherd", "status": "verdict", "caught": 5, "plants": 5, "extra_findings": [], "verifier_report": "scratch/toy2/verify-shepherd.md", "checked_by": "lead-merge"}
