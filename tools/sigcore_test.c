@@ -19,6 +19,13 @@
  *      including a TRUE underrun: a finite source that matches
  *      the spec but is exhausted must yield rc 2 (not the rc 1
  *      mismatch), feed() uncalled and state untouched
+ *   8. synthetic seek (toy_sig_seek_samples) is byte-exact vs
+ *      discarding single-sample polls - generator state fields
+ *      and the following 4096 sample bytes both - for desk
+ *      (across the t=30 s tap) and chest at several n including
+ *      1e6, from fresh and mid-stream, and for tone/chirp MIC;
+ *      REPLAY/LIVE/NONE/NULL refuse with the source untouched;
+ *      seek vs discard wall times at 1e6 print for the docs
  *
  * Build (from repo root, Git Bash):
  *   gcc -O2 -std=c11 -Wall -Wextra -Ilibs/muse-softfloat/include
@@ -28,6 +35,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include "toy_cart.h"
 #include "toy_math.h"
 #include "toy_util.h"
@@ -236,6 +244,198 @@ static void dial_checks(void)
     expect(toy_dial_feed(&d, rot, 100, 1) == 0 &&
            d.total_milliturns == 0,
            "non-IMU6 channel layout integrates nothing");
+}
+
+/* --- synthetic seek: exactness vs discarded polls ---
+ * The oracle is the generator itself driven the slow way:
+ * source A advances by n discarded single-sample polls,
+ * source B by toy_sig_seek_samples(n). Exact means the
+ * generator STATE FIELDS are equal and the next 4096 sampled
+ * values are memcmp-equal, not merely hash-close. */
+enum { SEEK_DESK, SEEK_CHEST, SEEK_MIC_TONE, SEEK_MIC_DOWN, SEEK_MIC_UP };
+static const char *const seek_names[] = {
+    "desk", "chest", "mic-tone", "mic-chirp-down", "mic-chirp-up"
+};
+static void seek_make(toy_sig_source_t *src, int which, uint64_t seed)
+{
+    memset(src, 0, sizeof *src);
+    switch (which) {
+    case SEEK_DESK:
+        if (toy_sig_source_synth_imu_scenario(src, seed, 100u, 1u) != 0) exit(2);
+        break;
+    case SEEK_CHEST:
+        if (toy_sig_source_synth_imu_scenario(src, seed, 100u, 2u) != 0) exit(2);
+        break;
+    case SEEK_MIC_TONE:
+        toy_sig_source_synth_mic(src, seed, 8000u, 440000u, 440000u, 0);
+        break;
+    case SEEK_MIC_DOWN: /* inc_delta < 0: descends, then freezes */
+        toy_sig_source_synth_mic(src, seed, 8000u, 440000u, 220000u, 10000u);
+        break;
+    default:
+        toy_sig_source_synth_mic(src, seed, 8000u, 220000u, 880000u, 10000u);
+        break;
+    }
+}
+
+static void discard_poll(toy_sig_source_t *src, uint64_t n, uint32_t chunk)
+{
+    int16_t buf[256 * TOY_SIG_MAX_CHANNELS];
+    while (n) {
+        uint32_t want = n > chunk ? chunk : (uint32_t)n;
+        uint32_t flags = 0;
+        uint32_t got = toy_sig_poll(src, 0, 0, buf, want, &flags);
+        if (got != want || flags) { fprintf(stderr, "discard poll short\n"); exit(2); }
+        n -= want;
+    }
+}
+
+static int seek_state_equal(const toy_sig_source_t *a, const toy_sig_source_t *b,
+                            int which)
+{
+    if (which == SEEK_DESK || which == SEEK_CHEST) {
+        const toy_sig_synth_imu_t *x = &a->synth_imu, *y = &b->synth_imu;
+        if (x->seq != y->seq || x->rng.s != y->rng.s ||
+            x->tilt_phase != y->tilt_phase || x->tap_phase != y->tap_phase ||
+            x->breath_phase != y->breath_phase || x->tap_env != y->tap_env)
+            return 0;
+        for (int i = 0; i < 6; i++)
+            if (x->bn[i].lp_fast != y->bn[i].lp_fast ||
+                x->bn[i].lp_slow != y->bn[i].lp_slow)
+                return 0;
+        return 1;
+    }
+    {
+        const toy_sig_synth_mic_t *x = &a->synth_mic, *y = &b->synth_mic;
+        return x->seq == y->seq && x->rng.s == y->rng.s &&
+               x->phase == y->phase && x->phase_inc == y->phase_inc &&
+               x->bn.lp_fast == y->bn.lp_fast && x->bn.lp_slow == y->bn.lp_slow;
+    }
+}
+
+#define SEEK_NEXT 4096u
+static int16_t seek_next_a[SEEK_NEXT * TOY_SIG_MAX_CHANNELS];
+static int16_t seek_next_b[SEEK_NEXT * TOY_SIG_MAX_CHANNELS];
+static void seek_case(int which, uint64_t seed, uint64_t pre, uint64_t n)
+{
+    toy_sig_source_t a, b;
+    uint32_t flags = 0;
+    char what[160];
+    seek_make(&a, which, seed);
+    seek_make(&b, which, seed);
+    discard_poll(&a, pre, 256u);
+    discard_poll(&b, pre, 256u);
+    discard_poll(&a, n, 1u); /* the oracle: single-sample polls */
+    int rc = toy_sig_seek_samples(&b, n);
+    int state_eq = rc == 0 && seek_state_equal(&a, &b, which);
+    uint32_t ga = toy_sig_poll(&a, 0, 0, seek_next_a, SEEK_NEXT, &flags);
+    uint32_t gb = toy_sig_poll(&b, 0, 0, seek_next_b, SEEK_NEXT, &flags);
+    uint64_t vals = (uint64_t)SEEK_NEXT * a.info.channels;
+    uint64_t ha = toy_sig_hash_samples(seek_next_a, SEEK_NEXT, a.info.channels);
+    uint64_t hb = toy_sig_hash_samples(seek_next_b, SEEK_NEXT, b.info.channels);
+    int bytes_eq = ga == SEEK_NEXT && gb == SEEK_NEXT &&
+                   memcmp(seek_next_a, seek_next_b,
+                          (size_t)vals * sizeof(int16_t)) == 0;
+    snprintf(what, sizeof what,
+             "seek %s pre=%llu n=%llu: state+next-%u bytes exact "
+             "(stream hash %016llx)",
+             seek_names[which], (unsigned long long)pre,
+             (unsigned long long)n, SEEK_NEXT, (unsigned long long)ha);
+    expect(state_eq && bytes_eq && ha == hb, what);
+}
+
+static double seek_ms(clock_t delta)
+{
+    return (double)delta * 1000.0 / (double)CLOCKS_PER_SEC;
+}
+
+static void seek_checks(void)
+{
+    static const uint64_t desk_n[] = {
+        0, 1, 2, 3, 17, 271, 2999, 3000, 3001, 3042, 3065, 3100,
+        20000, 100000, 1000000
+    };
+    static const uint64_t chest_n[] = {
+        0, 1, 2, 79, 80, 81, 159, 160, 161, 12345, 1000000
+    };
+    /* 200000 on the up-chirp carries phase_inc past 2^32
+     * (the phase-bookkeeping fallback path); on the
+     * down-chirp it is far past the descent freeze point. */
+    static const uint64_t mic_n[] = { 0, 1, 17, 9999, 10001, 25000, 100000,
+                                      200000 };
+    size_t i;
+    for (i = 0; i < sizeof desk_n / sizeof *desk_n; i++)
+        seek_case(SEEK_DESK, TEST_SEED, 0, desk_n[i]);
+    seek_case(SEEK_DESK, TEST_SEED, 12345, 54321); /* mid-stream */
+    seek_case(SEEK_DESK, 0xC0FFEEull, 2990, 100);  /* across the tap */
+    for (i = 0; i < sizeof chest_n / sizeof *chest_n; i++)
+        seek_case(SEEK_CHEST, TEST_SEED, 0, chest_n[i]);
+    seek_case(SEEK_CHEST, 777ull, 54321, 12345);
+    for (i = 0; i < sizeof mic_n / sizeof *mic_n; i++) {
+        seek_case(SEEK_MIC_TONE, TEST_SEED, 0, mic_n[i]);
+        seek_case(SEEK_MIC_DOWN, TEST_SEED, 0, mic_n[i]);
+        seek_case(SEEK_MIC_UP, TEST_SEED, 0, mic_n[i]);
+    }
+
+    /* Non-synthetic kinds refuse, source untouched. */
+    {
+        toy_sig_source_t none, live;
+        memset(&none, 0, sizeof none);
+        memset(&live, 0, sizeof live);
+        live.info.kind = TOY_SIG_KIND_LIVE;
+        live.info.device = TOY_SIG_DEVICE_IMU6;
+        expect(toy_sig_seek_samples(0, 10) == -1 &&
+               toy_sig_seek_samples(&none, 10) == -1 &&
+               toy_sig_seek_samples(&live, 10) == -1,
+               "seek refuses NULL / NONE / LIVE");
+        /* REPLAY: a real 2-sample TSIG source, cursor unmoved. */
+        int16_t vals[12] = { 0 };
+        toy_sig_info_t ri;
+        uint8_t tsig[TOY_SIG_HEADER_SIZE + sizeof vals];
+        toy_sig_source_t replay;
+        memset(&ri, 0, sizeof ri);
+        ri.kind = TOY_SIG_KIND_REPLAY;
+        ri.orig_kind = TOY_SIG_KIND_SYNTHETIC;
+        ri.device = TOY_SIG_DEVICE_IMU6;
+        ri.channels = 6u;
+        ri.sample_rate_hz = 100u;
+        ri.n_samples = 2u;
+        toy_sig_write_header(tsig, &ri, toy_sig_hash_samples(vals, 2u, 6u));
+        toy_sig_write_payload(tsig + TOY_SIG_HEADER_SIZE, vals, 2u, 6u);
+        expect(toy_sig_source_replay(&replay, tsig, sizeof tsig) == 0 &&
+               toy_sig_seek_samples(&replay, 1) == -1 &&
+               replay.replay.cursor == 0,
+               "seek refuses REPLAY, cursor untouched");
+    }
+
+    /* Timing at 1e6 for the docs: chunked discard (the fair
+     * fast form of polling) vs seek, desk and chest. Printed,
+     * not asserted - wall time is not a correctness oracle. */
+    {
+        toy_sig_source_t a, b;
+        clock_t t0;
+        seek_make(&a, SEEK_DESK, TEST_SEED);
+        t0 = clock();
+        discard_poll(&a, 1000000u, 256u);
+        double desk_discard = seek_ms(clock() - t0);
+        seek_make(&b, SEEK_DESK, TEST_SEED);
+        t0 = clock();
+        if (toy_sig_seek_samples(&b, 1000000u) != 0) exit(2);
+        double desk_seek = seek_ms(clock() - t0);
+        seek_make(&a, SEEK_CHEST, TEST_SEED);
+        t0 = clock();
+        discard_poll(&a, 1000000u, 256u);
+        double chest_discard = seek_ms(clock() - t0);
+        seek_make(&b, SEEK_CHEST, TEST_SEED);
+        t0 = clock();
+        if (toy_sig_seek_samples(&b, 1000000u) != 0) exit(2);
+        double chest_seek = seek_ms(clock() - t0);
+        printf("seek timing @1e6 host: desk discard %.2f ms seek %.2f ms; "
+               "chest discard %.2f ms seek %.3f ms\n",
+               desk_discard, desk_seek, chest_discard, chest_seek);
+        expect(seek_state_equal(&a, &b, SEEK_CHEST),
+               "timed chest seek also exact (state fields)");
+    }
 }
 
 int main(void)
@@ -515,6 +715,9 @@ int main(void)
                    "true underrun from exhausted matched source: rc 2, feed uncalled, state untouched");
         }
     }
+
+    /* 8. Synthetic seek exactness (checkpoint/bank restore). */
+    seek_checks();
 
     printf(failures ? "sigcore_test: FAIL (%d)\n" : "sigcore_test: PASS\n",
            failures);

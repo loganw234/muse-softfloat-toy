@@ -612,15 +612,36 @@ int main(int argc, char **argv)
         const toy_cart_t *cart = toy_cart_by_name(argv[2]);
         if (!cart) { fprintf(stderr, "unknown cart %s\n", argv[2]); return 2; }
         /* A signal source is host-owned and its position is not
-         * in TOYCKPT1, so an unfed save/resume would silently
-         * fork the stream. Refuse loudly until a restore parcel
-         * defines fast-forwarding the proof source to the
-         * header's step count x samples_per_step. */
-        if (cart->feed) { fprintf(stderr, "cart %s consumes a signal feed: checkpoints not supported for feed carts yet\n", cart->name); return 2; }
+         * in TOYCKPT1 - but for a SYNTHETIC proof source the
+         * position is reconstructible from the header: every
+         * runner feeds exactly samples_per_step before each
+         * step, so a checkpoint at step N sits at sample
+         * N * samples_per_step, and load seeks a fresh source
+         * there (toy_sig_seek_samples). Feed carts whose proof
+         * kind is not SYNTHETIC (future LIVE/REPLAY) stay
+         * refused loudly: their position is not a function of
+         * a step count, and resuming unfed would fork. */
+        if (cart->feed && cart->sig_spec.proof_kind != TOY_SIG_KIND_SYNTHETIC) { fprintf(stderr, "cart %s consumes a %s signal feed: checkpoints support synthetic feeds only (source position not reconstructible from a step count)\n", cart->name, toy_sig_kind_name(cart->sig_spec.proof_kind)); return 2; }
+        check_cart_input(cart);
         unsigned long long steps = strtoull(argv[3], NULL, 10);
         void *st = xcalloc(cart->state_size);
         cart->reset(st);
-        for (unsigned long long s = 0; s < steps; s++) cart->step(st);
+        if (cart->feed) {
+            /* Save the same stream `run` would print: proof
+             * source fed, proof script applied, feed -> apply
+             * -> step (a feed cart stepped unfed would save a
+             * NO-SIG state whose resume proves nothing). */
+            toy_sig_source_t *sig = sig_setup(cart);
+            uint32_t cur = 0;
+            toy_apply_proof_at(cart, st, 0, &cur);
+            for (unsigned long long s = 1; s <= steps; s++) {
+                sig_feed_or_die(cart, st, sig);
+                toy_apply_proof_at(cart, st, (uint32_t)s, &cur);
+                cart->step(st);
+            }
+        } else {
+            for (unsigned long long s = 0; s < steps; s++) cart->step(st);
+        }
         size_t img_len = toy_ckpt_image_size(cart);
         if (img_len == 0) { fprintf(stderr, "cart %s cannot be checkpointed\n", cart->name); return 2; }
         unsigned char *img = (unsigned char *)xcalloc(img_len);
@@ -664,14 +685,41 @@ int main(int argc, char **argv)
                     toy_ckpt_strerror(err));
             return 2;
         }
-        if (cart->feed) { fprintf(stderr, "cart %s consumes a signal feed: checkpoints not supported for feed carts yet (file left unchanged)\n", cart->name); return 2; }
-        printf("TOY-RUN cart=%s state_size=%zu hash=fnv1a64\n", cart->name, cart->state_size);
+        if (cart->feed && cart->sig_spec.proof_kind != TOY_SIG_KIND_SYNTHETIC) { fprintf(stderr, "cart %s consumes a %s signal feed: checkpoints support synthetic feeds only (file left unchanged; source position not reconstructible from step %llu)\n", cart->name, toy_sig_kind_name(cart->sig_spec.proof_kind), (unsigned long long)base_steps); return 2; }
+        check_cart_input(cart);
+        /* Synthetic feed restore: fresh proof source seeked to
+         * base_steps * samples_per_step, reproducing the exact
+         * generator state the saved run consumed up to this
+         * step; stepping then continues the `run` hash stream.
+         * Proof entries at or before base_steps are already in
+         * the state - the cursor skips them. */
+        toy_sig_source_t *sig = cart->feed ? sig_setup(cart) : NULL;
+        uint32_t cur = 0;
+        if (sig) {
+            uint64_t pos = base_steps * (uint64_t)cart->sig_spec.samples_per_step;
+            if (toy_sig_seek_samples(sig, pos) != 0) {
+                fprintf(stderr, "cannot seek synthetic source for %s to sample %llu (file left unchanged)\n",
+                        cart->name, (unsigned long long)pos);
+                return 2;
+            }
+            while (cart->proof_inputs && cur < cart->proof_input_count &&
+                   (uint64_t)cart->proof_inputs[cur].step <= base_steps)
+                cur++;
+        }
+        if (sig)
+            print_run_line(cart, sig);
+        else
+            printf("TOY-RUN cart=%s state_size=%zu hash=fnv1a64\n", cart->name, cart->state_size);
         printf("TOY-CKPT-LOADED cart=%s step %llu hash %016llx file %s\n",
                cart->name, (unsigned long long)base_steps,
                (unsigned long long)toy_hash_state(st, cart->state_size), argv[2]);
         for (unsigned long long s = 1; s <= more; s++) {
-            cart->step(st);
             unsigned long long abs_step = (unsigned long long)base_steps + s;
+            if (sig) { /* feed -> apply -> step */
+                sig_feed_or_die(cart, st, sig);
+                toy_apply_proof_at(cart, st, (uint32_t)abs_step, &cur);
+            }
+            cart->step(st);
             if (every > 0 && (abs_step % every) == 0)
                 printf("step %llu hash %016llx\n", abs_step,
                        (unsigned long long)toy_hash_state(st, cart->state_size));
@@ -744,6 +792,10 @@ int main(int argc, char **argv)
             fprintf(stderr, "bank begin failed: %s\n", toy_bank_strerror(err));
             return 2;
         }
+        /* Banking feeds synthetic feed carts exactly as `run`
+         * does; without the feed the keyframes would bank a
+         * NO-SIG run that replay could never reproduce. */
+        toy_sig_source_t *sig = sig_setup(cart);
         cart->reset(st);
         uint32_t cur = 0;
         toy_apply_proof_at(cart, st, 0, &cur); /* step-0 setup */
@@ -764,6 +816,7 @@ int main(int argc, char **argv)
                 next_kf++;
             }
             if (s >= total) break;
+            sig_feed_or_die(cart, st, sig); /* feed -> apply -> step */
             toy_apply_proof_at(cart, st, (uint32_t)(s + 1), &cur);
             cart->step(st);
         }

@@ -67,9 +67,11 @@ int16_t toy_sig_clamp_i16(int32_t v)
     return (int16_t)v;
 }
 
-int32_t toy_bandnoise_next(toy_bandnoise_t *b, toy_rng_t *r)
+/* One band-noise step on an already-drawn white sample w: the
+ * seek fast-forward below replays this recurrence against
+ * bounding trajectories with the same w sequence. */
+static int32_t bandnoise_step_w(toy_bandnoise_t *b, int32_t w)
 {
-    int32_t w = toy_rng_bipolar_q15(r);
     /* One-pole lowpasses y += (x-y)/2^k with floor shifts so the
      * recursion is identical everywhere. fast (k=2) passes the
      * tremor band, slow (k=8) tracks the wander; their
@@ -77,6 +79,11 @@ int32_t toy_bandnoise_next(toy_bandnoise_t *b, toy_rng_t *r)
     b->lp_fast += (int32_t)toy_sig_asr64((int64_t)w - b->lp_fast, 2);
     b->lp_slow += (int32_t)toy_sig_asr64((int64_t)w - b->lp_slow, 8);
     return b->lp_fast - b->lp_slow;
+}
+
+int32_t toy_bandnoise_next(toy_bandnoise_t *b, toy_rng_t *r)
+{
+    return bandnoise_step_w(b, toy_rng_bipolar_q15(r));
 }
 
 uint64_t toy_sig_fnv1a64(const void *bytes, size_t n)
@@ -691,5 +698,223 @@ uint32_t toy_sig_poll(toy_sig_source_t *src,
     if (produced < max_samples) flags |= TOY_SIG_FLAG_UNDERRUN;
     if (flags_out) *flags_out = flags;
     return produced;
+}
+
+/* --- synthetic seek (checkpoint/bank restore) --------------------
+ * Exactness contract: after toy_sig_seek_samples(src, n) the
+ * generator state is identical to n discarded single-sample
+ * polls. How each piece of state gets there:
+ *  - SplitMix64: every toy_rng_u32 adds the golden gamma once,
+ *    so k draws is the jump s += k * gamma (mod 2^64, which
+ *    uint64 arithmetic does by definition). Draws per sample
+ *    are fixed per generator: desk 6 (one band-noise draw per
+ *    axis), chest 6 (chest_noise per axis), mic 1.
+ *  - Phase accumulators are uint32 adds of a constant, so
+ *    n steps is phase += n * inc (mod 2^32).
+ *  - The desk tap envelope decays by a fixed ratio only while
+ *    > 8, so its advance loop runs at most ~70 iterations
+ *    from any reachable envelope, however large n is.
+ *  - The band-noise IIRs (desk, mic) have a floor per step
+ *    and genuinely no closed form. But each pole is a
+ *    contraction and the recurrence is monotone in its
+ *    initial state: replaying the tail window's true w
+ *    sequence from the reachable extremes [-32767, 32767]
+ *    brackets the true state, and when the two extremes meet
+ *    (they coalesce in a few thousand samples; the window is
+ *    16384) the bracketed value IS the true state - an exact
+ *    result, not an approximation, by monotonicity. In the
+ *    never-observed case they do not meet, seek falls back
+ *    to replaying the recurrence from the saved start, so
+ *    exactness never depends on the window being long enough.
+ * Nothing here materialises a sample: no sine lookups, no
+ * scaling, no clamping - and chest, having no IIR state at
+ * all, is closed-form outright. */
+
+#define TOY_SIG_SEEK_WINDOW 16384u
+
+static void rng_jump(toy_rng_t *r, uint64_t draws)
+{
+    r->s += draws * 0x9e3779b97f4a7c15ull; /* gamma, as toy_rng_u32 */
+}
+
+static uint32_t phase_advance(uint32_t phase, uint32_t inc, uint64_t n)
+{
+    return phase + (uint32_t)((uint64_t)(uint32_t)n * (uint64_t)inc);
+}
+
+static void bandnoise_seek(toy_bandnoise_t *bn, uint32_t n_filters,
+                           toy_rng_t *rng, uint64_t n)
+{
+    uint64_t i;
+    uint32_t a;
+    if (n <= (uint64_t)TOY_SIG_SEEK_WINDOW) {
+        for (i = 0; i < n; i++)
+            for (a = 0; a < n_filters; a++)
+                (void)toy_bandnoise_next(&bn[a], rng);
+        return;
+    }
+    {
+        toy_rng_t rng0 = *rng;
+        toy_bandnoise_t save[TOY_SIG_MAX_CHANNELS];
+        toy_bandnoise_t lo[TOY_SIG_MAX_CHANNELS];
+        toy_bandnoise_t hi[TOY_SIG_MAX_CHANNELS];
+        int met = 1;
+        for (a = 0; a < n_filters; a++) {
+            save[a] = bn[a];
+            /* Reachable hull: a pole fed w in [-32767,32767]
+             * stays between its start value and that range. */
+            lo[a].lp_fast = bn[a].lp_fast < -32767 ? bn[a].lp_fast : -32767;
+            lo[a].lp_slow = bn[a].lp_slow < -32767 ? bn[a].lp_slow : -32767;
+            hi[a].lp_fast = bn[a].lp_fast > 32767 ? bn[a].lp_fast : 32767;
+            hi[a].lp_slow = bn[a].lp_slow > 32767 ? bn[a].lp_slow : 32767;
+        }
+        rng_jump(rng, (n - (uint64_t)TOY_SIG_SEEK_WINDOW) *
+                      (uint64_t)n_filters);
+        for (i = 0; i < (uint64_t)TOY_SIG_SEEK_WINDOW; i++)
+            for (a = 0; a < n_filters; a++) {
+                int32_t w = toy_rng_bipolar_q15(rng);
+                (void)bandnoise_step_w(&lo[a], w);
+                (void)bandnoise_step_w(&hi[a], w);
+            }
+        for (a = 0; a < n_filters; a++)
+            if (lo[a].lp_fast != hi[a].lp_fast ||
+                lo[a].lp_slow != hi[a].lp_slow)
+                met = 0;
+        if (met) {
+            for (a = 0; a < n_filters; a++) bn[a] = lo[a];
+            return;
+        }
+        /* Exact fallback: replay from the saved start. */
+        *rng = rng0;
+        for (a = 0; a < n_filters; a++) bn[a] = save[a];
+        for (i = 0; i < n; i++)
+            for (a = 0; a < n_filters; a++)
+                (void)toy_bandnoise_next(&bn[a], rng);
+    }
+}
+
+/* Advance the tap envelope/phase over k samples in which no
+ * (re)trigger occurs: a decay step happens only while
+ * tap_env > 8, so this iterates O(log envelope), not O(k). */
+static void tap_decay_advance(toy_sig_synth_imu_t *s, uint64_t k)
+{
+    while (k > 0u && s->tap_env > 8) {
+        s->tap_phase += s->tap_inc;
+        s->tap_env = (int32_t)toy_sig_asr64((int64_t)s->tap_env * 29491, 15);
+        k--;
+    }
+}
+
+static void synth_imu_seek(toy_sig_synth_imu_t *s, uint64_t n)
+{
+    if (n == 0u) return;
+    if (s->info.scenario_id == 2u) { /* chest: no IIR state */
+        s->breath_phase = phase_advance(s->breath_phase, s->breath_inc, n);
+        rng_jump(&s->rng, 6ull * n);
+        s->seq += n;
+        return;
+    }
+    /* desk: the tap fires on the sample whose seq == tap_at */
+    if (s->seq <= s->tap_at && (s->tap_at - s->seq) < n) {
+        uint64_t pre = s->tap_at - s->seq;
+        tap_decay_advance(s, pre);
+        s->tap_env = s->tap_amp_lsb;
+        s->tap_phase = 0;
+        tap_decay_advance(s, n - pre);
+    } else {
+        tap_decay_advance(s, n);
+    }
+    s->tilt_phase = phase_advance(s->tilt_phase, s->tilt_inc, n);
+    bandnoise_seek(s->bn, 6u, &s->rng, n);
+    s->seq += n;
+}
+
+/* count*(count-1)/2 mod 2^32, with the halving applied to the
+ * even factor first so no wider intermediate is needed. */
+static uint32_t tri_mod32(uint64_t count)
+{
+    uint64_t a, b;
+    if (count == 0u) return 0u;
+    if ((count & 1ull) == 0u) { a = count / 2u; b = count - 1u; }
+    else { a = count; b = (count - 1u) / 2u; }
+    return (uint32_t)((uint64_t)(uint32_t)a * (uint64_t)(uint32_t)b);
+}
+
+/* Sum of (first + t*step) for t in [0,count), mod 2^32. The
+ * caller guarantees those terms are the generator's actual
+ * uint32 increments (no mid-sequence wrap of phase_inc). */
+static uint32_t ap_sum_mod32(uint64_t count, uint32_t first, int32_t step)
+{
+    uint32_t sum = (uint32_t)((uint64_t)(uint32_t)count * (uint64_t)first);
+    uint32_t tri = tri_mod32(count);
+    if (step > 0)
+        sum += (uint32_t)((uint64_t)tri * (uint64_t)(uint32_t)step);
+    else if (step < 0)
+        sum -= (uint32_t)((uint64_t)tri *
+                           (uint64_t)(uint32_t)(-(int64_t)step));
+    return sum;
+}
+
+static void synth_mic_seek(toy_sig_synth_mic_t *s, uint64_t n)
+{
+    int32_t d;
+    uint32_t p0;
+    if (n == 0u) return;
+    bandnoise_seek(&s->bn, 1u, &s->rng, n);
+    d = s->inc_delta;
+    p0 = s->phase_inc;
+    if (d == 0) {
+        s->phase = phase_advance(s->phase, p0, n);
+    } else if (d > 0) {
+        if (n - 1u <= (0xffffffffull - (uint64_t)p0) / (uint64_t)d) {
+            s->phase += ap_sum_mod32(n, p0, d);
+            s->phase_inc = (uint32_t)((uint64_t)p0 + n * (uint64_t)d);
+        } else {
+            /* phase_inc would wrap past 2^32 mid-sequence:
+             * replay just the phase bookkeeping exactly. */
+            uint64_t i;
+            for (i = 0; i < n; i++) {
+                int64_t inc;
+                s->phase += s->phase_inc;
+                inc = (int64_t)s->phase_inc + d;
+                if (inc > 0) s->phase_inc = (uint32_t)inc;
+            }
+        }
+    } else {
+        uint64_t a = (uint64_t)(-(int64_t)d);
+        if ((uint64_t)p0 <= a) {
+            /* The update p0 - a is never positive: frozen. */
+            s->phase = phase_advance(s->phase, p0, n);
+        } else {
+            /* p descends p0, p0-a, ... to the first value in
+             * (0, a], reached after tf updates, then freezes. */
+            uint64_t tf = ((uint64_t)p0 - a + a - 1u) / a;
+            uint32_t pf = (uint32_t)((uint64_t)p0 - a * tf);
+            if (n <= tf) {
+                s->phase += ap_sum_mod32(n, p0, d);
+                s->phase_inc = (uint32_t)((uint64_t)p0 - a * n);
+            } else {
+                s->phase += ap_sum_mod32(tf, p0, d);
+                s->phase = phase_advance(s->phase, pf, n - tf);
+                s->phase_inc = pf;
+            }
+        }
+    }
+    s->seq += n;
+}
+
+int toy_sig_seek_samples(toy_sig_source_t *src, uint64_t n_samples)
+{
+    if (!src) return -1;
+    if (src->info.kind != TOY_SIG_KIND_SYNTHETIC) return -1;
+    if (src->info.device == TOY_SIG_DEVICE_IMU6) {
+        synth_imu_seek(&src->synth_imu, n_samples);
+        return 0;
+    }
+    if (src->info.device == TOY_SIG_DEVICE_MIC1) {
+        synth_mic_seek(&src->synth_mic, n_samples);
+        return 0;
+    }
+    return -1;
 }
 
