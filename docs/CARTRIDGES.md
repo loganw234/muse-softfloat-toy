@@ -413,6 +413,94 @@ END <total_steps_at_export>
   Tilt/dial here rehearse the *events* a future IMU driver
   will emit, not the IMU or its signal path.
 
+## Product shell
+
+The web mock's UX as shared runner-side C: `core/toy_shell.{h,c}`
+owns which cart is showing, the gallery picker, the per-cart
+settings screen, the clock-set screen and the idle clock
+screensaver, all rendered through `toy_fb` and driven by
+`toy_event_t`. It is presentation-layer code like `toy_clock`:
+never inside a cartridge, enforced by the same placement-guard
+pattern (`toy_shell.h` will not compile without
+`TOY_SHELL_ALLOW` + `TOY_CLOCK_ALLOW`, which only runner code
+defines; header location in `core/` would prove nothing, since
+carts legitimately include `toy_fb.h`/`toy_cart.h` from there).
+The shell holds no cartridge state and never reads wall time:
+the runner passes a `toy_time_t` into `toy_shell_render()`
+every frame. It is proved host-side by `toy_emu shell <size>
+<outdir>`, a compiled-in scripted tour (gallery → settings →
+running → clock-set → clockface at a fixed fake now) printing
+the action log and a per-frame FNV-1a 64 over the framebuffer
+bytes; `board/CMakeLists.txt` links `toy_shell.c` into the
+firmware so Friday's board work is drivers + wiring only.
+
+- **Screens.** `GALLERY` (scrolling list of every registered
+  cart's name+title, selected cart's title+blurb detail, plus
+  `SET CLOCK` / `CLOCK FACE` virtual rows), `RUNNING` (the
+  cart owns the glass; the shell draws and steps nothing),
+  `SETTINGS` (the current cart's param table), `CLOCKSET`
+  (local hh:mm + UTC offset in 15-minute steps), `CLOCKFACE`
+  (analog + digital from the runner-supplied time, integer
+  hands; unset shows `--:--  SET CLOCK`). Rendering is
+  size-parametric (centre/radius fractions, milli-radius hit
+  bands, two text tiers) and allocation-free; all shell state
+  is one POD-ish `toy_shell_t` the runner allocates.
+- **Runner loop.** Every event goes to `toy_shell_event()`
+  first; the returned `TOY_SH_ACT_*` mask says what happened
+  (`START_CART`, `EXIT_TO_GALLERY`, `PARAM_QUEUED`,
+  `CLOCK_COMMIT`, `SCREEN`, `FORWARD_TO_CART`). Only
+  `FORWARD_TO_CART` events are queued to the cart, so shell
+  gestures can never leak into a cart's input stream. On
+  non-`RUNNING` screens the runner renders the shell and does
+  not step (editing pauses the sim; state bytes are
+  untouched). `toy_shell_tick()` once per frame idles
+  `GALLERY` into `CLOCKFACE` after `idle_limit_frames`
+  (default 1800 ≈ 60 s at 30 fps, 0 disables); `RUNNING`
+  never auto-hides the sim.
+- **Exit gesture.** `TOY_EV_KEY_DOWN`/`TOY_KEY_ESC` (or
+  `BUTTON_DOWN` id `TOY_SHELL_BUTTON_EXIT`), using only
+  existing event types. A corner long-press was rejected:
+  `toy_event_t` has no timestamp, so the shell cannot time a
+  press, and a stolen rim zone would eat genuine cart pointer
+  input. Touch-only drivers therefore own press timing and
+  synthesise the ESC event into the shell (ESC in the gallery
+  itself goes to the clockface). Settings is
+  `TOY_KEY_X` / button 1 / the gallery `SET >` footer; dial
+  (25 milliturns = one row), encoder, arrow keys and tap-a-row
+  navigate everywhere; tap the focused settings row's edge or
+  turn the dial (10 milliturns = one detent) to adjust.
+- **Settings/reset semantics** mirror the site panel exactly:
+  params live in shell state per current cart, seeded from
+  descriptor defaults. A live change queues one `SET_PARAM`
+  into `shell->param_queue` (`PARAM_QUEUED`; the runner drains
+  it with `toy_apply_queue` at the next step boundary).
+  `RESET_ONLY` params — and any param edited while its cart is
+  not running — are staged and labelled `*` / "STAGED: APPLIES
+  ON (RE)START", queueing nothing. On any (re)start
+  (`START_CART`) the shell refills the queue with every
+  user-touched param in descriptor order; the runner resets
+  the cart and drains that queue before step 1 (the step-0
+  slot). Untouched params are never queued, so defaults and
+  compiled-in step-0 proof settings are what an untouched
+  start runs. I32 steps are 1 (or range/100 on coarse ranges),
+  ENUM wraps, F64 edits move on a per-mille-of-range grid
+  through the softfloat path (never a host double); an
+  untouched F64 keeps its exact declared default bits and
+  shows the declared decimal string. Panel independence is
+  preserved: shell screens are not input — screen, selection
+  and param bookkeeping never enter state, and proof hashes
+  are unchanged.
+- **Clock ownership.** The runner owns time end to end.
+  `CLOCKSET` edits hh:mm + offset in shell fields (seeded from
+  the last time the runner passed to render, or
+  `toy_shell_clockset_begin`); commit emits `CLOCK_COMMIT`
+  and the runner — which owns the date — calls
+  `toy_clock_set()`. The shell holds a `toy_schedule_t` copy
+  inside `toy_shell_t` (runner-allocated, so runner-owned;
+  the shell only defaults it, schedule windows are not edited
+  on glass in v1). Nothing time-shaped reaches a cartridge,
+  per the placement rule in "Time layer" above.
+
 ## Required parcel evidence
 
 - `tools/run.sh check` passes (host determinism).

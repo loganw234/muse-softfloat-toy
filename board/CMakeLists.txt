@@ -184,6 +184,7 @@ add_executable(toy_board
     ${TOY_ROOT}/core/toy_fb.c
     ${TOY_ROOT}/core/toy_carts.c
     ${TOY_ROOT}/core/toy_input.c
+    ${TOY_ROOT}/core/toy_shell.c
     ${TOY_ROOT}/core/cart_fig8.c
     ${TOY_ROOT}/core/cart_pendulum.c
     ${TOY_ROOT}/core/cart_carousel.c

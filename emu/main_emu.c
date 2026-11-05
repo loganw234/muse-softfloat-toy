@@ -42,6 +42,15 @@
  *       in `proof` mode - the native re-proof of a browser
  *       session. An event's step is the 1-based proof-step
  *       number it applied before (see run_session).
+ *   toy_emu shell <size> <outdir>
+ *       Scripted tour of the product shell (core/toy_shell.h):
+ *       a compiled-in event sequence walks gallery -> settings
+ *       -> running -> clock-set -> clockface at a fixed fake
+ *       wall time, rendering fNNN.ppm frames and printing the
+ *       shell action log plus a per-frame FNV-1a 64 over the
+ *       framebuffer bytes (row-major, low byte then high byte
+ *       of each RGB565 pixel). Fully reproducible: same size,
+ *       same log, same fingerprints, every run.
  */
 #include <errno.h>
 #include <stdio.h>
@@ -54,6 +63,10 @@
  * wall time for bank labels/scheduling; cartridges never can. */
 #define TOY_CLOCK_ALLOW 1
 #include "toy_clock.h"
+/* Runner shell (core/toy_shell.h): presentation layer over the
+ * same registry; the emu is a runner, so it may drive it. */
+#define TOY_SHELL_ALLOW 1
+#include "toy_shell.h"
 
 static void *xcalloc(size_t n)
 {
@@ -519,6 +532,260 @@ static void print_morning_report(const toy_morning_report_t *r)
     printf("bank_bytes %zu\n", r->bank_bytes);
 }
 
+/* --- product shell tour (`shell` mode) ---
+ * The emu playing runner exactly as board/main_board.c will on
+ * Friday: every scripted event goes to toy_shell_event() first;
+ * START_CART resets the cart and drains the shell's param
+ * queue before step 1; FORWARD_TO_CART enqueues to the cart;
+ * CLOCK_COMMIT rewrites the fake wall clock (same UTC date,
+ * edited local hh:mm at the edited offset, seconds preserved);
+ * RUNNING frames step+render the cart, other frames render the
+ * shell with the fake now passed in. */
+static toy_shell_t emu_sh;
+static toy_fb_t emu_sh_fb;
+static toy_time_t emu_fake_now;
+static const toy_cart_t *emu_run_cart;
+static void *emu_run_state;
+static toy_sig_source_t *emu_run_sig;
+static uint32_t emu_run_cur;
+static long emu_run_abs;
+static toy_queue_t emu_live_q;
+static int emu_frame_no;
+static const char *emu_sh_outdir;
+
+static const char *shell_screen_name(uint8_t s)
+{
+    switch (s) {
+    case TOY_SHELL_GALLERY: return "GALLERY";
+    case TOY_SHELL_RUNNING: return "RUNNING";
+    case TOY_SHELL_SETTINGS: return "SETTINGS";
+    case TOY_SHELL_CLOCKSET: return "CLOCKSET";
+    case TOY_SHELL_CLOCKFACE: return "CLOCKFACE";
+    default: return "?";
+    }
+}
+
+static void shell_log_actions(uint32_t act)
+{
+    printf(" act=0x%02x", act);
+    if (act & TOY_SH_ACT_START_CART) printf("|START_CART");
+    if (act & TOY_SH_ACT_EXIT_TO_GALLERY) printf("|EXIT_TO_GALLERY");
+    if (act & TOY_SH_ACT_PARAM_QUEUED) printf("|PARAM_QUEUED");
+    if (act & TOY_SH_ACT_CLOCK_COMMIT) printf("|CLOCK_COMMIT");
+    if (act & TOY_SH_ACT_SCREEN) printf("|SCREEN");
+    if (act & TOY_SH_ACT_FORWARD_TO_CART) printf("|FORWARD_TO_CART");
+    if (!act) printf("|NONE");
+    printf(" screen=%s current=%s sel=%d qlen=%u\n",
+           shell_screen_name(toy_shell_screen(&emu_sh)),
+           toy_shell_current(&emu_sh) ? toy_shell_current(&emu_sh)->name : "-",
+           emu_sh.selected, emu_sh.param_queue.len);
+}
+
+static void shell_print_param_queue(const char *what)
+{
+    for (uint32_t i = 0; i < emu_sh.param_queue.len; i++) {
+        const toy_event_t *e = &emu_sh.param_queue.ev[i];
+        printf("  %s SET_PARAM idx=%u v=%d bits=%016llx\n", what, e->id,
+               e->v, (unsigned long long)e->bits);
+    }
+}
+
+static void shell_do_actions(uint32_t act, const toy_event_t *ev)
+{
+    if (act & TOY_SH_ACT_START_CART) {
+        const toy_cart_t *cart = toy_shell_current(&emu_sh);
+        if (!cart) { fprintf(stderr, "shell: START with no current cart\n"); exit(2); }
+        check_cart_input(cart);
+        emu_run_cart = cart;
+        emu_run_sig = sig_setup(cart);
+        memset(emu_run_state, 0, TOY_MAX_STATE_SIZE);
+        emu_run_abs = 0;
+        emu_run_cur = 0;
+        toy_queue_clear(&emu_live_q);
+        cart->reset(emu_run_state);
+        toy_apply_proof_at(cart, emu_run_state, 0, &emu_run_cur); /* proof step-0, as site select */
+        shell_print_param_queue("start-param");
+        toy_apply_queue(cart, emu_run_state, &emu_sh.param_queue,
+                        TOY_MAX_EVENTS_PER_STEP); /* user params, step-0 slot */
+        printf("  runner: reset %s, start params drained, hash %016llx\n",
+               cart->name,
+               (unsigned long long)toy_hash_state(emu_run_state, cart->state_size));
+    }
+    if ((act & TOY_SH_ACT_PARAM_QUEUED) && !(act & TOY_SH_ACT_START_CART)) {
+        shell_print_param_queue("live-param");
+        while (emu_sh.param_queue.len) { /* move to the cart live queue */
+            toy_queue_push(&emu_live_q, &emu_sh.param_queue.ev[0]);
+            for (uint32_t i = 1; i < emu_sh.param_queue.len; i++)
+                emu_sh.param_queue.ev[i - 1] = emu_sh.param_queue.ev[i];
+            emu_sh.param_queue.len--;
+        }
+    }
+    if (act & TOY_SH_ACT_EXIT_TO_GALLERY) {
+        printf("  runner: stopped %s\n", emu_run_cart ? emu_run_cart->name : "-");
+        emu_run_cart = NULL;
+    }
+    if (act & TOY_SH_ACT_CLOCK_COMMIT) {
+        int64_t days = emu_fake_now.utc_seconds / 86400;
+        int64_t sec = ((emu_fake_now.utc_seconds % 60) + 60) % 60;
+        int64_t local_s = (int64_t)emu_sh.clock_hh * 3600 +
+                          (int64_t)emu_sh.clock_mm * 60 + sec;
+        int64_t utc_s = (local_s - (int64_t)emu_sh.clock_tz_offset_min * 60) % 86400;
+        if (utc_s < 0) utc_s += 86400;
+        emu_fake_now.utc_seconds = days * 86400 + utc_s;
+        emu_fake_now.tz_offset_min = emu_sh.clock_tz_offset_min;
+        emu_fake_now.valid = true;
+        printf("  runner: toy_clock_set(utc=%lld, tz=%d) for local %02d:%02d\n",
+               (long long)emu_fake_now.utc_seconds,
+               (int)emu_fake_now.tz_offset_min,
+               emu_sh.clock_hh, emu_sh.clock_mm);
+    }
+    if (act & TOY_SH_ACT_FORWARD_TO_CART) {
+        toy_queue_push(&emu_live_q, ev);
+        printf("  runner: forwarded type=%u to cart queue (len=%u)\n",
+               ev->type, emu_live_q.len);
+    }
+}
+
+static void shell_send(toy_event_t ev, const char *label)
+{
+    printf("ev %s type=%u id=%u x=%d y=%d v=%d ->", label, ev.type, ev.id,
+           ev.x, ev.y, ev.v);
+    uint32_t act = toy_shell_event(&emu_sh, &ev);
+    shell_log_actions(act);
+    shell_do_actions(act, &ev);
+}
+
+static toy_event_t shell_ev(uint32_t type, uint32_t id, int32_t x, int32_t y, int32_t v)
+{
+    toy_event_t e;
+    memset(&e, 0, sizeof e);
+    e.type = type; e.id = id; e.x = x; e.y = y; e.v = v;
+    return e;
+}
+
+static uint64_t shell_fb_fnv(const toy_fb_t *fb)
+{
+    uint64_t h = 1469598103934665603ull;
+    size_t n = (size_t)fb->w * (size_t)fb->h;
+    for (size_t i = 0; i < n; i++) {
+        h ^= (uint64_t)(fb->px[i] & 0xffu); h *= 1099511628211ull;
+        h ^= (uint64_t)(fb->px[i] >> 8);    h *= 1099511628211ull;
+    }
+    return h;
+}
+
+static void shell_frame(const char *label, toy_time_t now)
+{
+    if (toy_shell_screen(&emu_sh) == TOY_SHELL_RUNNING && emu_run_cart) {
+        const toy_cart_t *cart = emu_run_cart;
+        for (uint32_t s = 0; s < cart->demo_steps_per_frame; s++) {
+            emu_run_abs++;
+            sig_feed_or_die(cart, emu_run_state, emu_run_sig);
+            uint32_t before = emu_run_cur;
+            toy_apply_proof_at(cart, emu_run_state, (uint32_t)emu_run_abs, &emu_run_cur);
+            toy_apply_queue(cart, emu_run_state, &emu_live_q,
+                            TOY_MAX_EVENTS_PER_STEP - (emu_run_cur - before));
+            cart->step(emu_run_state);
+        }
+        cart->render(emu_run_state, &emu_sh_fb);
+    } else {
+        toy_shell_render(&emu_sh, &emu_sh_fb, now);
+    }
+    char path[1024];
+    snprintf(path, sizeof path, "%s/f%03d.ppm", emu_sh_outdir, emu_frame_no);
+    if (write_ppm(path, &emu_sh_fb) != 0) {
+        fprintf(stderr, "cannot write %s\n", path);
+        exit(2);
+    }
+    printf("frame %d %s screen=%s sel=%d scroll=%d fbhash=%016llx%s\n",
+           emu_frame_no, label, shell_screen_name(toy_shell_screen(&emu_sh)),
+           emu_sh.selected, emu_sh.scroll,
+           (unsigned long long)shell_fb_fnv(&emu_sh_fb),
+           toy_shell_screen(&emu_sh) == TOY_SHELL_RUNNING && emu_run_cart
+               ? " (cart owns glass)" : "");
+    emu_frame_no++;
+}
+
+static int run_shell_tour(int size, const char *outdir)
+{
+    if (size < 64 || size > 1024) {
+        fprintf(stderr, "shell: size must be 64..1024\n");
+        return 2;
+    }
+    emu_sh_fb.w = emu_sh_fb.h = size;
+    emu_sh_fb.px = (uint16_t *)xcalloc((size_t)size * (size_t)size * sizeof(uint16_t));
+    emu_run_state = xcalloc(TOY_MAX_STATE_SIZE);
+    emu_sh_outdir = outdir;
+    emu_frame_no = 0;
+    emu_run_cart = NULL;
+    /* Fixed fake now: local 10:10:30 at UTC+01:00 on an
+     * arbitrary fixed UTC date (day 20000 since the epoch). */
+    emu_fake_now.utc_seconds = 20000ll * 86400ll + (10ll * 3600 + 10 * 60 + 30 - 3600);
+    emu_fake_now.tz_offset_min = 60;
+    emu_fake_now.valid = true;
+    toy_time_t unset;
+    memset(&unset, 0, sizeof unset);
+    toy_shell_init(&emu_sh, toy_carts, toy_cart_count);
+    int32_t gravity = -1;
+    for (int i = 0; i < toy_cart_count; i++)
+        if (strcmp(toy_carts[i]->name, "gravity") == 0) gravity = i;
+    if (gravity < 0) { fprintf(stderr, "shell: gravity cart missing\n"); return 2; }
+    printf("TOY-SHELL size=%d carts=%d fake_utc=%lld fake_tz=%d (local 10:10:30)\n",
+           size, toy_cart_count, (long long)emu_fake_now.utc_seconds,
+           (int)emu_fake_now.tz_offset_min);
+    shell_frame("gallery-top", emu_fake_now);
+    shell_send(shell_ev(TOY_EV_DIAL, 0, 0, 0, 200), "dial+200");
+    shell_frame("gallery-mid", emu_fake_now);
+    shell_send(shell_ev(TOY_EV_DIAL, 0, 0, 0, 400), "dial+400-to-bottom");
+    shell_frame("gallery-bottom", emu_fake_now);
+    shell_send(shell_ev(TOY_EV_DIAL, 0, 0, 0, (gravity - emu_sh.selected) * 25), "dial-to-gravity");
+    shell_frame("gallery-gravity", emu_fake_now);
+    shell_send(shell_ev(TOY_EV_POINTER_DOWN, 0, 400, 800, 0), "tap-footer-set");
+    shell_frame("settings-initial", emu_fake_now);
+    shell_send(shell_ev(TOY_EV_POINTER_DOWN, 0, 500, -480, 0), "tap-row0-right-bodies+");
+    shell_frame("settings-bodies-staged", emu_fake_now);
+    shell_send(shell_ev(TOY_EV_KEY_DOWN, TOY_KEY_DOWN, 0, 0, 0), "key-down-softening");
+    shell_send(shell_ev(TOY_EV_DIAL, 0, 0, 0, 100), "dial+100-softening");
+    shell_frame("settings-softening", emu_fake_now);
+    shell_send(shell_ev(TOY_EV_KEY_DOWN, TOY_KEY_DOWN, 0, 0, 0), "key-down-palette");
+    shell_send(shell_ev(TOY_EV_KEY_DOWN, TOY_KEY_RIGHT, 0, 0, 0), "key-right-palette+");
+    shell_frame("settings-palette", emu_fake_now);
+    shell_send(shell_ev(TOY_EV_KEY_DOWN, TOY_KEY_ENTER, 0, 0, 0), "enter-start-with-staged");
+    shell_frame("running-gravity", emu_fake_now);
+    shell_send(shell_ev(TOY_EV_POINTER_DOWN, 0, 0, 0, 0), "pointer-centre-to-cart");
+    shell_frame("running-forwarded", emu_fake_now);
+    shell_send(shell_ev(TOY_EV_KEY_DOWN, TOY_KEY_X, 0, 0, 0), "key-x-settings");
+    shell_send(shell_ev(TOY_EV_KEY_DOWN, TOY_KEY_RIGHT, 0, 0, 0), "key-right-palette-live");
+    shell_frame("settings-live-param", emu_fake_now);
+    shell_send(shell_ev(TOY_EV_KEY_DOWN, TOY_KEY_ESC, 0, 0, 0), "esc-resume");
+    shell_frame("running-resumed", emu_fake_now);
+    shell_send(shell_ev(TOY_EV_KEY_DOWN, TOY_KEY_ESC, 0, 0, 0), "esc-exit");
+    shell_frame("gallery-return", emu_fake_now);
+    shell_send(shell_ev(TOY_EV_DIAL, 0, 0, 0, (toy_cart_count - emu_sh.selected) * 25), "dial-to-set-clock");
+    shell_send(shell_ev(TOY_EV_KEY_DOWN, TOY_KEY_ENTER, 0, 0, 0), "enter-clockset");
+    shell_frame("clockset-seeded", emu_fake_now);
+    shell_send(shell_ev(TOY_EV_KEY_DOWN, TOY_KEY_RIGHT, 0, 0, 0), "hh+1");
+    shell_send(shell_ev(TOY_EV_KEY_DOWN, TOY_KEY_ENTER, 0, 0, 0), "enter-to-mm");
+    shell_send(shell_ev(TOY_EV_DIAL, 0, 0, 0, 350), "dial+350-mm");
+    shell_send(shell_ev(TOY_EV_KEY_DOWN, TOY_KEY_ENTER, 0, 0, 0), "enter-to-tz");
+    shell_send(shell_ev(TOY_EV_DIAL, 0, 0, 0, 180), "dial+180-tz");
+    shell_frame("clockset-edited", emu_fake_now);
+    shell_send(shell_ev(TOY_EV_KEY_DOWN, TOY_KEY_ENTER, 0, 0, 0), "enter-to-set");
+    shell_send(shell_ev(TOY_EV_KEY_DOWN, TOY_KEY_ENTER, 0, 0, 0), "enter-commit");
+    shell_frame("clockface-set", emu_fake_now);
+    shell_frame("clockface-unset", unset);
+    shell_send(shell_ev(TOY_EV_KEY_DOWN, TOY_KEY_DOWN, 0, 0, 0), "key-wake-to-gallery");
+    shell_frame("gallery-wake", emu_fake_now);
+    emu_sh.idle_limit_frames = 5;
+    uint32_t idle_act = TOY_SH_ACT_NONE;
+    for (int i = 0; i < 5; i++) idle_act = toy_shell_tick(&emu_sh);
+    printf("tick x5 (idle limit 5) ->");
+    shell_log_actions(idle_act);
+    shell_frame("clockface-idle", emu_fake_now);
+    printf("TOY-SHELL-DONE frames=%d size=%d\n", emu_frame_no, size);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     if (argc >= 2 && strcmp(argv[1], "list") == 0 && argc == 2) {
@@ -853,6 +1120,8 @@ int main(int argc, char **argv)
     }
     if (argc >= 2 && strcmp(argv[1], "session") == 0 && argc == 3)
         return run_session(argv[2]);
+    if (argc >= 2 && strcmp(argv[1], "shell") == 0 && argc == 4)
+        return run_shell_tour(atoi(argv[2]), argv[3]);
     fprintf(stderr,
         "usage:\n"
         "  toy_emu list\n"
@@ -865,6 +1134,7 @@ int main(int argc, char **argv)
         "  toy_emu replay <file>\n"
         "  toy_emu report <file>\n"
         "  toy_emu session <file>\n"
+        "  toy_emu shell <size> <outdir>\n"
         "  toy_emu clock\n"
         "carts:");
     for (int i = 0; i < toy_cart_count; i++) fprintf(stderr, " %s", toy_carts[i]->name);
