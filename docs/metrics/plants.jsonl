@@ -61,3 +61,4 @@
 {"parcel": "toy3-session", "status": "verdict", "caught": 5, "plants": 5, "extra_findings": [], "verifier_report": "scratch/toy2/verify-session.md", "checked_by": "lead-merge"}
 {"parcel": "toy3-heartbeat", "status": "verdict", "caught": 5, "plants": 5, "extra_findings": [], "verifier_report": "scratch/toy2/verify-heartbeat.md", "checked_by": "lead-merge"}
 {"parcel": "toy4-flashckpt", "parcel_commit": "7a94ce53257dfe9049410db844250897b32b1097", "copy_head": "92415c7f04ecf7e15e268119070532448df42d85", "plants": 5, "key_sha256": "ec92c76160c6eb666b7c4261456ff415f7fc99343cc00765e9599fc377da1b9b", "checked_by": "lead-merge", "status": "dispatched"}
+{"parcel": "toy4-tsig", "parcel_commit": "51e30a5b7ad79b8e584d58482ede62f3208754a5", "copy_head": "74b60250c8f36795d79132f58914b6609b73af3a", "plants": 5, "key_sha256": "bcae7d4ccc9f1cc6fdb61f88c0a20cf57aad824b8f04614b9da2616e115ebee9", "checked_by": "lead-merge", "status": "dispatched"}
