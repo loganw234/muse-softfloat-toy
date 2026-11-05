@@ -67,7 +67,7 @@ const char *toy_bank_strerror(toy_bank_err_t err)
     case TOY_BANK_ERR_REPLAY_HASH:   return "restep hash != keyframe hash";
     case TOY_BANK_ERR_OUT_TOO_SMALL: return "destination too small";
     case TOY_BANK_ERR_SEQUENCE:      return "writer calls out of order";
-    case TOY_BANK_ERR_FEED_CART:     return "signal-feed carts cannot bank yet";
+    case TOY_BANK_ERR_FEED_CART:     return "non-synthetic signal feed cannot be reconstructed from a step count";
     }
     return "?";
 }
@@ -147,10 +147,15 @@ toy_bank_err_t toy_bank_begin(toy_bank_writer_t *w, const toy_cart_t *cart,
                               unsigned char *buf, size_t cap)
 {
     if (!w || !cart || !buf) return TOY_BANK_ERR_NULL;
-    /* Replay re-steps without a signal source (source position
-     * is runner-owned, like checkpoints): refuse feed carts
-     * loudly until re-feeding lands with the first such cart. */
-    if (cart->feed) return TOY_BANK_ERR_FEED_CART;
+    /* A synthetic feed cart banks: every runner feeds exactly
+     * samples_per_step before each step, so a keyframe's source
+     * position is step_index * samples_per_step and replay can
+     * reconstruct it with toy_sig_seek_samples (see
+     * toy_bank_verify_replay). LIVE/REPLAY proof kinds stay
+     * refused loudly: their position is not a function of a
+     * step count, and no bank byte records it. */
+    if (cart->feed && cart->sig_spec.proof_kind != TOY_SIG_KIND_SYNTHETIC)
+        return TOY_BANK_ERR_FEED_CART;
     uint32_t count = toy_bank_keyframe_count(total_steps, every);
     size_t total = toy_bank_estimate_size(cart, count);
     if (total == 0) return TOY_BANK_ERR_COUNT; /* past budget/cap */
@@ -376,8 +381,29 @@ toy_bank_err_t toy_bank_verify_replay(const unsigned char *buf, size_t len,
     const toy_cart_t *cart = 0;
     toy_bank_err_t err = toy_bank_parse(buf, len, NULL, &info, &cart);
     if (err != TOY_BANK_OK) return err;
-    if (cart->feed) return TOY_BANK_ERR_FEED_CART; /* cannot re-feed yet */
+    if (cart->feed && cart->sig_spec.proof_kind != TOY_SIG_KIND_SYNTHETIC)
+        return TOY_BANK_ERR_FEED_CART; /* not reconstructible */
     if (scratch_cap < cart->state_size) return TOY_BANK_ERR_OUT_TOO_SMALL;
+
+    /* Synthetic feed: instantiate the descriptor's proof
+     * source and seek it ONCE to keyframe 0's position
+     * (step * samples_per_step); the re-step loop then feeds
+     * continuously, exactly as the banking runner did, so
+     * later keyframes need no further seek. */
+    toy_sig_source_t sig_src;
+    toy_sig_source_t *sig = NULL;
+    static int16_t sig_frame[TOY_SIG_MAX_FRAME_VALUES];
+    if (cart->feed) {
+        toy_bank_keyframe_t kf0_;
+        int created = toy_sig_proof_source_init(cart, &sig_src);
+        read_keyframe(buf, &info, 0, &kf0_);
+        if (created != 1 ||
+            toy_sig_seek_samples(&sig_src,
+                                 kf0_.step_index *
+                                     (uint64_t)cart->sig_spec.samples_per_step) != 0)
+            return TOY_BANK_ERR_FEED_CART;
+        sig = &sig_src;
+    }
 
     /* Seed from keyframe 0 through the checkpoint loader (which
      * re-validates it and guards the copy). */
@@ -407,6 +433,10 @@ toy_bank_err_t toy_bank_verify_replay(const unsigned char *buf, size_t len,
         toy_bank_keyframe_t kf;
         read_keyframe(buf, &info, i, &kf);
         for (uint64_t s = prev_step + 1; s <= kf.step_index; s++) {
+            /* feed -> apply -> step, the runner boundary order */
+            if (toy_feed_step(cart, scratch, sig, sig_frame,
+                              TOY_SIG_MAX_FRAME_VALUES) != 0)
+                return TOY_BANK_ERR_FEED_CART;
             toy_apply_proof_at(cart, scratch, (uint32_t)s, &cursor);
             cart->step(scratch);
         }

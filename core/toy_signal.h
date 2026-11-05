@@ -379,4 +379,27 @@ uint32_t toy_sig_poll(toy_sig_source_t *src,
                       int16_t *out, uint32_t max_samples,
                       uint32_t *flags_out);
 
+/* Advance a SYNTHETIC source by n_samples, leaving it in the
+ * exact state n discarded single-sample polls would (byte-exact
+ * generator state: phases, tap envelope, noise-filter state,
+ * RNG, seq), so the next poll continues the pinned stream.
+ * This is the checkpoint/bank restore primitive: a runner that
+ * fed exactly samples_per_step before every step rebuilds the
+ * source position at a checkpoint/keyframe as
+ * step_count * samples_per_step, with no format change.
+ * Fast: phase accumulators advance closed-form and the
+ * SplitMix64 state jumps by draws x gamma; only the
+ * band-noise IIR recurrence (which has per-step floors and no
+ * closed form) is replayed, and only over a bounded tail
+ * window whose extreme-valued trajectories provably coalesce
+ * onto the true state, with an exact full-replay fallback if
+ * they ever did not - cost is independent of n beyond the
+ * window. The "chest" scenario has no IIR state and is pure
+ * O(1). Returns 0 on success, -1 (source untouched) for a
+ * NULL source or a kind/device with no reconstructible
+ * synthetic generator state (REPLAY / LIVE / NONE stay
+ * refused: a stream position cannot be rebuilt from a count
+ * for sources whose samples are not a function of a seed). */
+int toy_sig_seek_samples(toy_sig_source_t *src, uint64_t n_samples);
+
 #endif

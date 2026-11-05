@@ -169,14 +169,48 @@ short contract summary.
   remainder kept, full turns never wrap). Embed it in state
   to derive dial effects from your feed, or let a future live
   runner own it and queue the events to `apply()`.
-- Checkpoints: the source position is host-owned and not in
-  `TOYCKPT1`, so `toy_emu save`/`load` currently **refuse**
-  feed carts loudly rather than resume unfed; a restore
-  parcel can later fast-forward a fresh synthetic source by
-  header steps x `samples_per_step`. Board firmware lists
-  `core/toy_signal.c` explicitly for on-device proof
-  instantiation. `tools/sigcore_test.c` is a runnable example
-  of the whole seam with a minimal IMU-consuming cart.
+- Checkpoints and banks: the source position is host-owned
+  and not in `TOYCKPT1`, but for a **synthetic** source it
+  needs no bytes - every runner feeds exactly
+  `samples_per_step` before each step, so at runner step N
+  the source sits at sample `N * samples_per_step`.
+  `toy_emu save`/`load` and `TOYBANK1` banking/replay support
+  feed carts whose `sig_spec.proof_kind` is `SYNTHETIC`:
+  restore instantiates the descriptor's fresh proof source
+  and fast-forwards it with `toy_sig_seek_samples` (no
+  format change), then continues feed -> apply -> step, and
+  the resumed hash stream is the uninterrupted `run` stream.
+  `LIVE`/`REPLAY` proof kinds stay **refused loudly** at
+  save, load and bank begin/verify: their next sample is not
+  a function of a step count, and resuming them unfed (or
+  from sample 0) would silently fork the stream. Board
+  firmware lists `core/toy_signal.c` explicitly for
+  on-device proof instantiation. `tools/sigcore_test.c` is a
+  runnable example of the whole seam with a minimal
+  IMU-consuming cart.
+- Seek exactness: `toy_sig_seek_samples(src, n)` leaves a
+  synthetic generator in the state of n discarded
+  single-sample polls - byte-exact, proven in
+  `tools/sigcore_test.c` for desk (across the t=30 s tap),
+  chest and MIC at many `n` up to 1e6, fresh and mid-stream.
+  Phase accumulators advance closed-form (`phase += n*inc`)
+  and the SplitMix64 state jumps by draws x gamma; the desk
+  tap envelope needs only its ~70 decay steps. The
+  band-noise IIRs have a per-step floor and no closed form,
+  so seek replays just their recurrence (never a sample:
+  no sine/scale/clamp) over a bounded 16384-sample tail
+  window from both reachable extremes - the poles are
+  monotone contractions, so when the extremes meet the
+  bracket is the exact state (with an exact full-replay
+  fallback if they ever did not); chest has no IIR state
+  and is pure O(1). Non-synthetic kinds return an error
+  with the source untouched. Cost is independent of `n`
+  past the window: measured on the host at n=1e6, desk seek
+  ~2 ms vs ~155 ms for discarded polling and chest seek
+  below timer resolution vs ~45 ms (MinGW host build; on
+  RP2040-class parts expect the same shape at tens-of-ms
+  scale for the windowed desk/MIC seek - a bounded ~16k
+  sample recurrence, ~100k RNG draws - and O(1) for chest).
 - TSIG replay import/export (host emu): two modes re-run a
   cart on recorded bytes. `toy_emu tsigout <cart> <steps>
   <file>` exports exactly the synthetic proof samples a
@@ -271,6 +305,18 @@ Rules that follow for cartridge authors:
   affects stepping from outside state silently voids resume.
   Do not embed a step counter the runner already keeps; the
   header carries the runner's count.
+- Feed carts restore through that count, not through stored
+  source bytes: the header's step count times
+  `samples_per_step` is the synthetic source's sample
+  position, rebuilt by `toy_sig_seek_samples` at load (see
+  "Signal feed seam"). `toy_emu save` for a feed cart
+  therefore runs the same fed, proof-scripted stream as
+  `run` - never an unfed NO-SIG run - and `load` continues
+  that stream bit-exact (`tools/ckpt_test.c` proves gpend,
+  heartbeat and seismo resumed hashes equal the
+  uninterrupted run). Only `SYNTHETIC` proof kinds resume
+  this way; `LIVE`/`REPLAY` refuse, because no count
+  reconstructs them.
 
 ## Time layer, banking & morning report
 
@@ -311,7 +357,14 @@ kit. This is the short contract summary.
   first keyframe and re-steps to each later one, requiring the
   state hash to match at every keyframe: every replayed frame
   is an exact stepped state, and a mismatch stops playback
-  loudly. Budget is fixed at 8 MiB per bank (480 fig8 keyframes
+  loudly. Synthetic feed carts bank on the same terms: the
+  banking loop feeds exactly as `run` does, and replay seeks
+  a fresh proof source once to the first keyframe's
+  `step * samples_per_step` and then feeds continuously
+  between keyframes (`TOY_BANK_ERR_FEED_CART` now means only
+  a non-synthetic proof kind, whose position no step count
+  reconstructs; a tampered feed keyframe still fails on
+  replay hash, proven in `tools/ckpt_test.c`). Budget is fixed at 8 MiB per bank (480 fig8 keyframes
   at the 60 s default = ~6.4 MiB; wider spacing for larger
   states — writers refuse past-budget counts). Host modes:
   `toy_emu bank <cart> <steps> <keyframe-every> [file]`,
@@ -568,8 +621,10 @@ These are known before dispatching the first wave:
   above) has landed; LIVE drivers, board/WASM REPLAY proof
   bytes, further synthetic scenarios and a gyro-coherent
   attitude model still wait for the kits and
-  their own parcels. Checkpoint save/load for feed carts is
-  refused until source-position restore lands.
+  their own parcels. Checkpoint/bank restore for synthetic
+  feed carts has landed (seek by step count, above); LIVE
+  and REPLAY sources still refuse checkpoint/bank restore
+  by design.
 - Checkpoint core exists (`core/toy_ckpt.{h,c}`, host
   `save`/`load` - see [Checkpoints](#checkpoints) above), but
   the board flash-slot and browser IndexedDB backends are later
