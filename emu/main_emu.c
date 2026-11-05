@@ -42,6 +42,23 @@
  *       in `proof` mode - the native re-proof of a browser
  *       session. An event's step is the 1-based proof-step
  *       number it applied before (see run_session).
+ *   toy_emu feedrun <cart> <file.tsig> <steps>
+ *       TSIG replay import: feed <cart> from a recorded TSIG v1
+ *       byte stream (core/toy_signal.h) instead of its synthetic
+ *       proof source, proof inputs and boundary order unchanged.
+ *       The header must match the cart's sig_spec exactly
+ *       (device, channels, sample rate; no resampling) and its
+ *       payload FNV must verify, else exit 2 before any step -
+ *       and a stream that ends early aborts mid-run at the
+ *       step it starved. The TOY-RUN line names sig=replay and
+ *       the file's stream id, so a replay hash is a distinct
+ *       pinned hash, never a synthetic proof hash in disguise.
+ *   toy_emu tsigout <cart> <steps> <file>
+ *       Export the cart's synthetic proof stream (exactly
+ *       <steps> x samples_per_step samples) as a TSIG v1 file,
+ *       so the same bytes can be re-run via feedrun - and,
+ *       come real captures, a detector can be run on the
+ *       synthetic file and the recorded file side by side.
  */
 #include <errno.h>
 #include <stdio.h>
@@ -519,6 +536,270 @@ static void print_morning_report(const toy_morning_report_t *r)
     printf("bank_bytes %zu\n", r->bank_bytes);
 }
 
+/* --- TSIG replay import/export (`feedrun` / `tsigout`) ---
+ * The replay twin of the proof loops above: identical boundary
+ * order (step-0 proof setup, then feed -> apply -> step), the
+ * only swap being the source - a TSIG v1 file's bytes via
+ * toy_sig_source_replay + toy_feed_step_bytes instead of the
+ * descriptor's synthetic spec via sig_setup + toy_feed_step.
+ * Validation is strict and happens BEFORE the cart is touched,
+ * like `session`: a signal-deaf cart, a malformed header, an
+ * inexact length, a payload whose FNV-1a 64 does not equal the
+ * header's payload-hash field (the format's integrity check;
+ * TSIG has no separate CRC field), or a header that disagrees
+ * with sig_spec on device/channels/sample rate each exit 2
+ * without printing a hash line.
+ *
+ * The rate must EQUAL the spec: resampling is forbidden, not
+ * merely unimplemented. Every feed cart's per-sample filters
+ * and step dt are built for the spec rate (an 8-sample detrend
+ * is 80 ms only at 100 Hz), so silently accepting a 200 Hz
+ * recording would run different physics under the same cart
+ * name. study-signals section 4 rule 3 binds rates statically
+ * for exactly this reason; a mismatched capture must be
+ * re-recorded at rate, or resampled by a future proven core
+ * decimator, never here.
+ *
+ * Identity: the file bytes are the stream. The TOY-RUN line
+ * prints sig=replay, orig_kind rides in the TOY-TSIG line, and
+ * stream= is the payload hash from the header (verified
+ * against the payload before stepping). The hashed label in
+ * cart state therefore records REPLAY + that id - by the
+ * labelling rule (study-signals section 7) a feedrun final
+ * hash pins the replay run itself and must differ from the
+ * synthetic proof hash even when tsigout exported those exact
+ * samples: the sample path is bit-exact, the provenance words
+ * in hashed state honestly are not. */
+static unsigned char *read_whole_file(const char *path, size_t *len_out)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    size_t cap = 1u << 16, n = 0;
+    unsigned char *buf = (unsigned char *)malloc(cap);
+    if (!buf) { fclose(f); return NULL; }
+    for (;;) {
+        if (n == cap) {
+            size_t want = cap * 2u;
+            unsigned char *grown = (unsigned char *)realloc(buf, want);
+            if (!grown) { free(buf); fclose(f); return NULL; }
+            buf = grown;
+            cap = want;
+        }
+        size_t r = fread(buf + n, 1, cap - n, f);
+        n += r;
+        if (r == 0) break;
+    }
+    int bad = ferror(f);
+    fclose(f);
+    if (bad) { free(buf); return NULL; }
+    *len_out = n;
+    return buf;
+}
+
+static int run_feedrun(const char *cart_name, const char *path,
+                       const char *steps_text)
+{
+    uint64_t steps = 0;
+    if (sess_parse_u64(steps_text, &steps) != 0 ||
+        steps > 0xffffffffull) {
+        fprintf(stderr, "feedrun: bad step count %s\n", steps_text);
+        return 2;
+    }
+    const toy_cart_t *cart = toy_cart_by_name(cart_name);
+    if (!cart) { fprintf(stderr, "unknown cart %s\n", cart_name); return 2; }
+    check_cart_input(cart);
+    if (!cart->feed) {
+        fprintf(stderr,
+                "feedrun: cart %s consumes no signal feed"
+                " (signal-deaf); a TSIG stream has nowhere to go\n",
+                cart->name);
+        return 2;
+    }
+    size_t len = 0;
+    unsigned char *bytes = read_whole_file(path, &len);
+    if (!bytes) { fprintf(stderr, "cannot read %s\n", path); return 2; }
+    if (toy_sig_source_replay(&emu_sig_src, bytes, len) != 0) {
+        fprintf(stderr,
+                "feedrun: %s is not a valid TSIG v1 stream"
+                " (bad header, or payload shorter than the"
+                " header claims)\n", path);
+        free(bytes);
+        return 2;
+    }
+    toy_sig_source_t *src = &emu_sig_src;
+    const toy_sig_info_t *info = &src->info;
+    uint64_t payload_bytes =
+        info->n_samples * (uint64_t)info->channels * 2ull;
+    if ((uint64_t)len != (uint64_t)TOY_SIG_HEADER_SIZE + payload_bytes) {
+        fprintf(stderr,
+                "feedrun: %s has %zu bytes but its header describes"
+                " %llu (trailing bytes are not part of a stream's"
+                " identity): rejected\n",
+                path, len,
+                (unsigned long long)((uint64_t)TOY_SIG_HEADER_SIZE +
+                                     payload_bytes));
+        free(bytes);
+        return 2;
+    }
+    uint64_t computed = toy_sig_fnv1a64(bytes + TOY_SIG_HEADER_SIZE,
+                                        (size_t)payload_bytes);
+    if (computed != src->replay.payload_hash) {
+        fprintf(stderr,
+                "feedrun: %s payload hash mismatch: header says"
+                " %016llx, payload computes %016llx; the file"
+                " bytes are the identity and they do not agree"
+                " with themselves\n",
+                path, (unsigned long long)src->replay.payload_hash,
+                (unsigned long long)computed);
+        free(bytes);
+        return 2;
+    }
+    const toy_sig_spec_t *spec = &cart->sig_spec;
+    if (info->device != spec->device) {
+        fprintf(stderr,
+                "feedrun: %s is device %u but cart %s binds device"
+                " %u; rejected\n",
+                path, info->device, cart->name, spec->device);
+        free(bytes);
+        return 2;
+    }
+    if (info->channels != toy_sig_device_channels(spec->device)) {
+        fprintf(stderr,
+                "feedrun: %s has %u channels but cart %s's device"
+                " %u layout is %u; rejected\n",
+                path, info->channels, cart->name, spec->device,
+                toy_sig_device_channels(spec->device));
+        free(bytes);
+        return 2;
+    }
+    if (info->sample_rate_hz != spec->sample_rate_hz) {
+        fprintf(stderr,
+                "feedrun: %s is %u Hz but cart %s binds %u Hz;"
+                " resampling is forbidden (the cart's per-sample"
+                " filters and dt assume the spec rate): rejected\n",
+                path, info->sample_rate_hz, cart->name,
+                spec->sample_rate_hz);
+        free(bytes);
+        return 2;
+    }
+    void *st = xcalloc(cart->state_size);
+    cart->reset(st);
+    uint32_t cur = 0;
+    toy_apply_proof_at(cart, st, 0, &cur); /* step-0 setup; no feed */
+    print_run_line(cart, src);
+    printf("TOY-TSIG file=%s orig=%s samples=%llu scale=%u scale2=%u"
+           " payload_hash=%016llx verified=1\n",
+           path, toy_sig_kind_name(info->orig_kind),
+           (unsigned long long)info->n_samples, info->scale_num,
+           info->scale2_num,
+           (unsigned long long)src->replay.payload_hash);
+    for (uint64_t s = 1; s <= steps; s++) {
+        int rc = toy_feed_step_bytes(cart, st, src, bytes, len,
+                                     emu_sig_frame,
+                                     TOY_SIG_MAX_FRAME_VALUES);
+        if (rc != 0) {
+            if (rc == 2)
+                fprintf(stderr,
+                        "feedrun: TSIG underrun at step %llu for %s:"
+                        " stream exhausted (%llu samples in file,"
+                        " %u needed per step); run aborted, no"
+                        " samples invented\n",
+                        (unsigned long long)s, cart->name,
+                        (unsigned long long)info->n_samples,
+                        spec->samples_per_step);
+            else
+                fprintf(stderr,
+                        "feedrun: signal feed failed at step %llu"
+                        " for %s (code %d); run aborted\n",
+                        (unsigned long long)s, cart->name, rc);
+            free(bytes);
+            return 2;
+        }
+        toy_apply_proof_at(cart, st, (uint32_t)s, &cur);
+        cart->step(st);
+    }
+    uint64_t h = toy_hash_state(st, cart->state_size);
+    printf("step %llu hash %016llx\n", (unsigned long long)steps,
+           (unsigned long long)h);
+    printf("TOY-DONE steps %llu hash %016llx\n",
+           (unsigned long long)steps, (unsigned long long)h);
+    free(bytes);
+    return 0;
+}
+
+/* Export exactly the samples a proof run of <steps> steps
+ * would consume, polled per-step from a fresh proof source so
+ * the sequence is the proof sequence by construction. The
+ * header is the format builder's (toy_sig_write_header) over
+ * the source info with n_samples filled in; orig_kind stays
+ * SYNTHETIC, so the file never claims to be a recording. */
+static int run_tsigout(const char *cart_name, const char *steps_text,
+                       const char *path)
+{
+    uint64_t steps = 0;
+    if (sess_parse_u64(steps_text, &steps) != 0 ||
+        steps > 0xffffffffull) {
+        fprintf(stderr, "tsigout: bad step count %s\n", steps_text);
+        return 2;
+    }
+    const toy_cart_t *cart = toy_cart_by_name(cart_name);
+    if (!cart) { fprintf(stderr, "unknown cart %s\n", cart_name); return 2; }
+    check_cart_input(cart);
+    if (!cart->feed) {
+        fprintf(stderr,
+                "tsigout: cart %s consumes no signal feed"
+                " (signal-deaf); it has no proof stream to export\n",
+                cart->name);
+        return 2;
+    }
+    toy_sig_source_t *src = sig_setup(cart); /* exits 2 on failure */
+    uint32_t per_step = cart->sig_spec.samples_per_step;
+    uint32_t channels = src->info.channels;
+    uint64_t n_samples = steps * (uint64_t)per_step;
+    uint64_t values = n_samples * (uint64_t)channels;
+    if (values > (uint64_t)(SIZE_MAX / sizeof(int16_t)) ||
+        values * 2ull > (uint64_t)SIZE_MAX - TOY_SIG_HEADER_SIZE) {
+        fprintf(stderr, "tsigout: %llu steps is too large to export\n",
+                (unsigned long long)steps);
+        return 2;
+    }
+    int16_t *samples =
+        (int16_t *)xcalloc((size_t)values * sizeof(int16_t));
+    for (uint64_t s = 0; s < steps; s++) {
+        uint32_t flags = 0;
+        uint32_t got = toy_sig_poll(src, NULL, 0,
+                                    samples + (size_t)(s * per_step *
+                                                       channels),
+                                    per_step, &flags);
+        if (got != per_step || flags != 0u) {
+            fprintf(stderr,
+                    "tsigout: synthetic proof source underran at"
+                    " step %llu for %s (got %u, flags %u)\n",
+                    (unsigned long long)(s + 1u), cart->name, got, flags);
+            return 2;
+        }
+    }
+    uint64_t payload_hash =
+        toy_sig_hash_samples(samples, n_samples, channels);
+    toy_sig_info_t export_info = src->info;
+    export_info.n_samples = n_samples; /* unbounded -> this file */
+    size_t total = (size_t)TOY_SIG_HEADER_SIZE + (size_t)values * 2u;
+    unsigned char *bytes = (unsigned char *)xcalloc(total);
+    toy_sig_write_header(bytes, &export_info, payload_hash);
+    toy_sig_write_payload(bytes + TOY_SIG_HEADER_SIZE, samples,
+                          n_samples, channels);
+    if (write_file_atomic(path, bytes, total) != 0) {
+        fprintf(stderr, "cannot write %s\n", path);
+        return 2;
+    }
+    printf("TOY-TSIG-SAVED cart=%s steps %llu samples %llu"
+           " payload_hash %016llx bytes %zu file %s\n",
+           cart->name, (unsigned long long)steps,
+           (unsigned long long)n_samples,
+           (unsigned long long)payload_hash, total, path);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     if (argc >= 2 && strcmp(argv[1], "list") == 0 && argc == 2) {
@@ -853,6 +1134,10 @@ int main(int argc, char **argv)
     }
     if (argc >= 2 && strcmp(argv[1], "session") == 0 && argc == 3)
         return run_session(argv[2]);
+    if (argc >= 2 && strcmp(argv[1], "feedrun") == 0 && argc == 5)
+        return run_feedrun(argv[2], argv[3], argv[4]);
+    if (argc >= 2 && strcmp(argv[1], "tsigout") == 0 && argc == 5)
+        return run_tsigout(argv[2], argv[3], argv[4]);
     fprintf(stderr,
         "usage:\n"
         "  toy_emu list\n"
@@ -865,6 +1150,8 @@ int main(int argc, char **argv)
         "  toy_emu replay <file>\n"
         "  toy_emu report <file>\n"
         "  toy_emu session <file>\n"
+        "  toy_emu feedrun <cart> <file.tsig> <steps>\n"
+        "  toy_emu tsigout <cart> <steps> <file>\n"
         "  toy_emu clock\n"
         "carts:");
     for (int i = 0; i < toy_cart_count; i++) fprintf(stderr, " %s", toy_carts[i]->name);

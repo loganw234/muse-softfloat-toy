@@ -177,6 +177,49 @@ short contract summary.
   `core/toy_signal.c` explicitly for on-device proof
   instantiation. `tools/sigcore_test.c` is a runnable example
   of the whole seam with a minimal IMU-consuming cart.
+- TSIG replay import/export (host emu): two modes re-run a
+  cart on recorded bytes. `toy_emu tsigout <cart> <steps>
+  <file>` exports exactly the synthetic proof samples a
+  `<steps>`-step run would consume (`steps x
+  samples_per_step`), as TSIG v1 via the format builder in
+  `core/toy_signal.c` with `orig_kind` SYNTHETIC - the file
+  never claims to be a recording. `toy_emu feedrun <cart>
+  <file.tsig> <steps>` feeds the cart from that file (or any
+  TSIG capture, e.g. a real IMU recording) through
+  `toy_sig_source_replay` + the bytes-carrying
+  `toy_feed_step_bytes` in `core/toy_cart.h`, with the proof
+  boundary order, proof script, and step semantics unchanged.
+  Validation is strict and happens before any step: a
+  signal-deaf cart, a malformed header, a file length that is
+  not exactly header + claimed payload, a payload whose
+  FNV-1a 64 does not equal the header's payload-hash field
+  (the format's integrity check - TSIG v1 has no separate CRC
+  field; `toy_sig_parse_header` checks structure and bounds,
+  `feedrun` adds the hash pass), or a header disagreeing with
+  `sig_spec` on device, channels, or sample rate each exit 2
+  with no hash line. The rate must **equal** the spec:
+  resampling is forbidden, because per-sample filters and the
+  step dt are built for the spec rate, so a re-timed stream
+  would run different physics under the same cart name. A
+  stream that ends before `<steps>` steps aborts mid-run with
+  exit 2 naming the starved step; samples are never invented.
+  Identity and determinism: the **file bytes are the stream**.
+  `TOY-RUN` prints `sig=replay` and `stream=` the verified
+  payload hash, and a `TOY-TSIG` line adds `orig=` (synthetic
+  or live), sample count, and the header scales, so two runs
+  are comparable exactly when their bytes are. One labelling
+  consequence, by design (study section 7): the hashed label
+  records REPLAY + the payload stream id, so a `feedrun` final
+  hash is its own pinned hash and **differs from the synthetic
+  proof hash even when `tsigout` exported those very
+  samples** - the sample path round-trips bit-exactly (the
+  exported payload regenerates to the same payload hash, and
+  synthetic-vs-replay final states differ only in the nine
+  label bytes: 8 of `stream_id`, 1 of `kind`), while the
+  provenance words in hashed state honestly do not. Board
+  and WASM replay sources are still later parcels; the emu
+  modes are the place a recorded capture is first re-proven
+  against the synthetic file with the same detector.
 
 ## Rendering rules
 
@@ -433,9 +476,10 @@ These are known before dispatching the first wave:
 - Signal feed seam landed (see "Signal feed seam" above),
   including the IMU dial producer in core. Sensor carts are
   parcel-ready against synthetic proof streams (scenarios 1
-  desk and 2 chest); LIVE drivers, REPLAY proof bytes, further
-  synthetic scenarios and a gyro-coherent attitude model still
-  wait for the kits and
+  desk and 2 chest), and host TSIG replay (`feedrun`/`tsigout`
+  above) has landed; LIVE drivers, board/WASM REPLAY proof
+  bytes, further synthetic scenarios and a gyro-coherent
+  attitude model still wait for the kits and
   their own parcels. Checkpoint save/load for feed carts is
   refused until source-position restore lands.
 - Checkpoint core exists (`core/toy_ckpt.{h,c}`, host
