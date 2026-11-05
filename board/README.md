@@ -147,6 +147,121 @@ flash/RAM instead of DCP stubs).
 - `get_absolute_time()`/`to_ms_since_boot()` (`clock_board.c`),
   `gpio_xor_mask`, USB stdio: unchanged APIs on RP2350.
 
+## Internal-flash checkpoint slots (compile-proven, not yet wired)
+
+`ckpt_flash.{h,c}` + `core/toy_ckpt_slot.h` is the resume-last
+checkpoint backend (`core/toy_ckpt.h` images, at most 65,600 B).
+It is linked into `toy_board` (symbols rooted against
+`--gc-sections`) but `main_board.c` never calls it: no boot
+behaviour changed, and the proof hash stream is untouched.
+Nothing here has run on a board; the first on-device proof is
+the checklist below. Pure slot logic (geometry, newest-valid,
+rotation) is host-tested against a RAM fake NOR in
+`tools/flashslot_test.c`.
+
+Slot design (`docs/study-checkpoint.md` 5.1, A/B form): each
+slot is sized for the format cap, not today's largest cart -
+`ceil(65600 / 4096) * 4096 = 69,632 B` (17 sectors) - and holds
+one TOYCKPT1 image verbatim at offset 0, padded with 0xFF to a
+256 B program-page multiple, no wrapper bytes. Torn writes are
+caught by the image's own header/payload CRCs + state hash in
+`toy_ckpt_validate()`. Selection: among fully valid slots for
+the expected cartridge, the highest header `step_count` wins
+(ties: lowest slot); blank (0xFF) and torn slots are skipped.
+The next write always targets the slot *after* the newest
+valid one, so a power cut mid-write leaves the previous
+checkpoint intact. One honest limitation: `step_count` restarts
+on cartridge switch, so scans must be cartridge-scoped (the
+backend's `write_next` scopes rotation to the image's own
+cart); whether a cart switch erases the slots is wiring policy,
+not backend policy. Writes go through the SDK's
+`flash_safe_execute` (interrupts/core safety is the SDK's, with
+`PICO_FLASH_ASSUME_CORE1_SAFE=1` because this firmware is
+single-core), erase the whole slot, program, then read back
+via XIP and re-validate byte-for-byte. The image buffer must
+be in SRAM. The backend imposes no save-rate policy - triggers
+(events + 15 min backstop, study 5.1) are the caller's duty,
+called between frames: a cap-size write is 17 erases + 257
+page programs with XIP stalled (fig8: 17 + 55).
+
+Layout derives from `PICO_FLASH_SIZE_BYTES` (board header),
+slots at the END of flash. Concrete maps (offsets are flash
+offsets; add `0x10000000` for XIP addresses):
+
+| flash | region base | slot 0 | slot 1 | region end |
+|---|---|---|---|---|
+| 2 MiB (Pico/RP2040 dev) | `0x1DE000` | `0x1DE000..0x1EF000` | `0x1EF000..0x200000` | `0x200000` |
+| 4 MiB (`pico2` default) | `0x3DE000` | `0x3DE000..0x3EF000` | `0x3EF000..0x400000` | `0x400000` |
+| 16 MiB (RP2350 module) | `0xFDE000` | `0xFDE000..0xFEF000` | `0xFEF000..0x1000000` | `0x1000000` |
+
+The pair reserves 139,264 B: 6.6% of 2 MiB, 0.83% of 16 MiB.
+Firmware fits far below it: the default RP2040 BIN is 152,668 B
+against a 1,957,888 B base - always re-check `BIN size <
+layout->base_offset` when the firmware grows. Catch for the
+module: today's RP2350 build uses the `pico2` header, which
+*assumes* 4 MiB, so its slots land at the 4 MiB end (correct for
+that header, mid-device on the 16 MiB part). The 16 MiB row
+above becomes real only with a board header defining
+`PICO_FLASH_SIZE_BYTES (16 * 1024 * 1024)` - part of the 1.85C
+board-header job below.
+
+Wear (assumes the W25Q-class 100k erase cycles/sector - verify
+against the fitted parts; every save to a slot erases all 17 of
+its sectors once, and rotation halves the rate per slot):
+
+| saves/day | shape | per-slot erases/day | time to 100k cycles |
+|---|---|---|---|
+| 4 | event-only, light use | 2 | ~137 years |
+| 20 | event-heavy (cart switches) | 10 | ~27 years |
+| 96 | 15 min backstop, always stepping | 48 | ~5.7 years |
+| 288 | 5 min backstop | 144 | ~1.9 years |
+| 1,440 | every minute | 720 | ~139 days |
+
+So per-frame or per-minute checkpointing kills the part; the
+study's events-plus-15-minute policy gives years of margin.
+Widening to the 4-slot ring `toy_ckpt_slot.h` already supports
+(278,528 B, base `0xFBC000` on 16 MiB) halves the rates again
+if a tighter resume window ever matters on the module.
+
+Internal slots vs SD: internal flash holds exactly one thing -
+resume-last for the running cartridge, available with no card
+present. Per-cartridge banks, a checkpoint gallery and history
+belong on the RP2350 kit's microSD as generation-named
+`.ckpt` files (study 5.2); the same TOYCKPT1 bytes serve both,
+and SD must never gate internal-flash resume.
+
+First on-device proof (Friday; deliberately not done by this
+compile-only parcel):
+
+1. Confirm the fitted flash: sector/page geometry and rated
+   erase cycles vs the assumptions above (also why
+   `ckpt_flash.c` static-asserts the SDK sizes).
+2. One write/read proof: throwaway build with
+   `-DTOY_CKPT_FLASH_SELFTEST=ON` plus a temporary boot call to
+   `toy_ckpt_flash_selftest_roundtrip()` around a real
+   `toy_ckpt_serialize()` image; print the result, the written
+   slot, `toy_ckpt_flash_last_safe_rc()`, and the read-back
+   `state_hash` next to the host hash for the same step count
+   (they must match). Remove the call and rebuild default-OFF
+   afterwards - a boot write per power-up is wear for nothing.
+3. Power-cut test: loop `toy_ckpt_flash_write_next()` with
+   increasing step counts, yank power mid-loop several times,
+   and confirm boot always resumes a fully valid earlier image,
+   never the torn one.
+4. Confirm a fresh `picotool load` of a new UF2 leaves a saved
+   slot readable (expected - UF2 writes addressed blocks only -
+   but unproven here), and re-check BIN size vs the slot base.
+5. Then the real wiring: resume-at-boot + event/backstop save
+   triggers in the live firmware's frame loop.
+
+Build evidence for this backend (Release, fresh dirs,
+2026-11-04): RP2040 UF2 305,664 B (BIN 152,668 B), RP2350 UF2
+299,008 B (BIN 149,248 B). The RP2040 delta against the same
+commit built without the backend (UF2 297,984 B, BIN 148,756 B)
+is +7,680 B UF2 / +3,912 B BIN, +56 B BSS - the backend objects
+only; the UF2 is expected to differ from current `main` for
+exactly that reason.
+
 ## When the kit arrives (not done here - compile proof only)
 
 Nothing was flashed for this work. Expected first steps:

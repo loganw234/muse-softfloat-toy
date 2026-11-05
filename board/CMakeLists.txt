@@ -178,9 +178,19 @@ set(TOY_ROOT ${CMAKE_CURRENT_LIST_DIR}/..)
 set(LIB ${TOY_ROOT}/libs/muse-softfloat)
 file(GLOB LIB_SRC ${LIB}/src/*.c)
 
+# Internal-flash checkpoint backend selftest (board/ckpt_flash.h):
+# OFF by default - it only compiles an uncalled one-shot helper
+# for the first on-device write/read proof. An always-on
+# boot-time flash write would burn erase cycles and could
+# destroy a real resume slot if ever shipped by accident.
+option(TOY_CKPT_FLASH_SELFTEST
+    "Compile the (uncalled) flash checkpoint round-trip selftest" OFF)
+
 add_executable(toy_board
     main_board.c
     clock_board.c
+    ckpt_flash.c
+    ${TOY_ROOT}/core/toy_ckpt.c
     ${TOY_ROOT}/core/toy_fb.c
     ${TOY_ROOT}/core/toy_carts.c
     ${TOY_ROOT}/core/toy_input.c
@@ -211,7 +221,37 @@ add_executable(toy_board
 target_include_directories(toy_board PRIVATE ${LIB}/include ${TOY_ROOT}/core)
 target_compile_definitions(toy_board PRIVATE TOY_GIT_HEAD="${TOY_GIT_HEAD}")
 target_compile_options(toy_board PRIVATE -O2)
-target_link_libraries(toy_board pico_stdlib pico_unique_id)
+# pico_flash provides flash_safe_execute, hardware_flash the
+# erase/program primitives it wraps (board/ckpt_flash.c).
+target_link_libraries(toy_board pico_stdlib pico_unique_id pico_flash hardware_flash)
+# This firmware never launches core 1, so flash_safe_execute
+# may assume it safe and use the IRQ-only path (without this,
+# pico_flash refuses as NOT_PERMITTED when pico_multicore is
+# linked but no lockout victim runs on core 1). A future
+# core-1 firmware must drop this and call
+# flash_safe_execute_core_init() on core 1 instead.
+target_compile_definitions(toy_board PRIVATE PICO_FLASH_ASSUME_CORE1_SAFE=1)
+if(TOY_CKPT_FLASH_SELFTEST)
+    target_compile_definitions(toy_board PRIVATE TOY_CKPT_FLASH_SELFTEST=1)
+endif()
+# The checkpoint backend is deliberately uncalled by this proof
+# firmware; root its entry points so --gc-sections keeps the
+# linked API in the UF2 for Friday's wiring to call.
+target_link_options(toy_board PRIVATE
+    -Wl,--undefined=toy_ckpt_flash_layout
+    -Wl,--undefined=toy_ckpt_flash_last_safe_rc
+    -Wl,--undefined=toy_ckpt_flash_slot_xip
+    -Wl,--undefined=toy_ckpt_flash_read_slot
+    -Wl,--undefined=toy_ckpt_flash_find_newest
+    -Wl,--undefined=toy_ckpt_flash_load_newest
+    -Wl,--undefined=toy_ckpt_flash_write_slot
+    -Wl,--undefined=toy_ckpt_flash_write_next
+    -Wl,--undefined=toy_ckpt_flash_erase_slot
+    -Wl,--undefined=toy_ckpt_flash_erase_all)
+if(TOY_CKPT_FLASH_SELFTEST)
+    target_link_options(toy_board PRIVATE
+        -Wl,--undefined=toy_ckpt_flash_selftest_roundtrip)
+endif()
 if(_toy_platform_actual STREQUAL "rp2350")
     # Float/double discipline on RP2350 (audit: board/README.md).
     # The SDK defaults would silently substitute hardware paths:
