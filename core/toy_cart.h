@@ -99,6 +99,7 @@ extern const toy_cart_t toy_cart_seismo;
 extern const toy_cart_t toy_cart_attitude;
 extern const toy_cart_t toy_cart_synspec;
 extern const toy_cart_t toy_cart_heartbeat;
+extern const toy_cart_t toy_cart_pond;
 
 extern const toy_cart_t *const toy_carts[];
 extern const int toy_cart_count;
