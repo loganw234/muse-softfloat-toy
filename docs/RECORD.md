@@ -352,8 +352,9 @@ sundial correction. pond is a 48x48 binary64 wave
 heightfield (state 38,136 B): touch droplets, tilt slosh,
 a derived Jury stability bound enforced by the wavespeed
 cap. It is browser-live and runs in slow motion on the
-RP2040 (measured host 1.75 ms/step; the board proof below
-is its first on-device timing). shepherd gameifies the
+RP2040 (measured host 1.75 ms/step; 245-330 ms/step
+on-device remains a labelled ESTIMATE - the board gate
+proves its hashes, and prints no per-step timing). shepherd gameifies the
 gravity sandbox: a pinned anchor, scheduled LCG spawns,
 capture = bound orbital energy inside the pen for 300
 consecutive steps, escape/crash losses, merges, streak
