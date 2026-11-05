@@ -319,3 +319,55 @@ All three parcels planted-copy verified 5/5; final
 reported step, heartbeat's chest stream generated on the
 Pico itself (stream f51502b5). Gallery: 20 cartridges,
 one core, three platforms, one hash.
+
+## toy4 prep round lands: shell, seeks, science clock, pond, shepherd (2026-11-04)
+
+Eight parcels of pre-kit preparation. The product shell
+(core/toy_shell.{h,c}) is the runner the RP2350 firmware
+will drive on Friday: gallery, settings with
+touched-only/RESET_ONLY staging semantics, RUNNING
+forwarding with an ESC/button exit gesture, clock-set and
+an idle clockface - proven host-side by a scripted emu tour
+whose frame fingerprints are pinned (f13/f15/f16/f18).
+Synthetic feed seek (toy_sig_seek_samples) makes feed
+cartridges checkpointable: position is step x
+samples_per_step, restored in bounded time (desk 1e6
+samples: 2.00 ms seek vs 129 ms discard on host) with the
+resumed hash stream bit-identical to the uninterrupted run
+on gpend, seismo and heartbeat; LIVE/REPLAY sources still
+refuse by design. TSIG feedrun/tsigout replays recorded
+byte streams under an honest REPLAY label - the nine
+provenance bytes differ, nothing else does. The internal
+flash checkpoint backend compiles against A/B slots at the
+flash end (compile-proven only until the kit's power-cut
+test). The fluid study measured that binary32 buys state,
+not speed (0.63-1.12x), and prescribed the cartridge that
+followed.
+
+Three cartridges join the gallery. solclock is the science
+clock: equation of time to ~0.04 min at the four extremes,
+solar declination, mean-phase moon, a 36-point analemma,
+mean and apparent hands - the desk toy as a working
+sundial correction. pond is a 48x48 binary64 wave
+heightfield (state 38,136 B): touch droplets, tilt slosh,
+a derived Jury stability bound enforced by the wavespeed
+cap. It is browser-live and runs in slow motion on the
+RP2040 (measured host 1.75 ms/step; the board proof below
+is its first on-device timing). shepherd gameifies the
+gravity sandbox: a pinned anchor, scheduled LCG spawns,
+capture = bound orbital energy inside the pen for 300
+consecutive steps, escape/crash losses, merges, streak
+scoring and a difficulty ramp - proof ends at score 100
+with 5 captures, 2 losses, 9 spawns, 5 merges.
+
+All eight parcels planted-copy verified 5/5 (cumulative
+180/180 across 36 parcels). The 23-cartridge board gate
+PASSes host == board at every reported step
+(20:41-21:36, window raised to 5400 s via
+TOY_BOARD_WINDOW); solclock ae761075, pond d38a0974 and
+shepherd e1052d04 now have on-device proofs, and the site
+serves all 23 with host == WASM hashes. Gallery: 23
+cartridges, one core, three platforms, one hash. The
+RP2350 kit arrives Friday: drivers, live sources, and the
+flash power-cut proof are next.
+
