@@ -72,3 +72,5 @@
 {"parcel": "toy4-pond", "parcel_commit": "3471a394812f507b602d68cc646d54609fd799d1", "copy_head": "37b8dc3082c4703ce5fc74360c7d1a32f8076213", "plants": 5, "key_sha256": "0d12600dd4b0cdf641db5ed8643b40540390ebda8b6be7703a575a28cc2242a7", "checked_by": "lead-merge", "status": "dispatched"}
 {"parcel": "toy4-solclock", "status": "verdict", "caught": 5, "plants": 5, "extra_findings": [], "verifier_report": "scratch/toy2/verify-solclock.md", "checked_by": "lead-merge"}
 {"parcel": "toy4-shell", "status": "verdict", "caught": 5, "plants": 5, "extra_findings": [], "verifier_report": "scratch/toy2/verify-shell.md", "checked_by": "lead-merge"}
+{"parcel": "toy4-feedckpt", "status": "verdict", "caught": 5, "plants": 5, "extra_findings": ["non-feed emu save/load never applied proof script (pre-existing, not parcel scope)"], "verifier_report": "scratch/toy2/verify-feedckpt.md", "checked_by": "lead-merge"}
+{"parcel": "toy4-pond", "status": "verdict", "caught": 5, "plants": 5, "extra_findings": [], "verifier_report": "scratch/toy2/verify-pond.md", "checked_by": "lead-merge"}
