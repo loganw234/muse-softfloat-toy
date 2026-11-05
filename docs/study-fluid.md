@@ -312,9 +312,11 @@ glass worse than every candidate above.
    comfortably live at 1–2 steps/frame; that expectation is
    labelled, not measured, until a cart exists.
 2. **f32 buys state, not speed — measured.** Across all three
-   softfloat prototypes, msf32 kernels ran 0.85–1.1x the msf64
-   time on this host (occasionally slower: wave 64 run 1,
-   5.52 vs 5.09). The library's shared wide internals mean
+   softfloat prototypes, msf32 kernels ran 0.63–1.12x the msf64
+   time on this host run-paired (fastest relative win PBF-400
+   at ~0.63x; occasionally slower: wave 64 run 1, 5.52 vs 5.09;
+   wave-48/LBM cluster ~0.8–1.1x). [Range corrected at merge:
+   verifier recomputation of the tables above.] The library's shared wide internals mean
    binary32 is not the 2–4x lever intuition suggests. Caveat,
    stated plainly: this is a host measurement; the RP2040's
    32-bit datapath might favour msf32 relatively more, and
