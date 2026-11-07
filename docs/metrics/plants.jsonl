@@ -77,3 +77,4 @@
 {"parcel": "toy4-shepherd", "parcel_commit": "ae3654b8643fa8bc2eaa529423411d943bbf7c98", "copy_head": "053b51d3fd3c24f05e0aae006b75715080c58037", "plants": 5, "key_sha256": "cf5b3b2d73fabd757d89076890807c97b7109a7d4239d111e8e1a0241d063845", "checked_by": "lead-merge", "status": "dispatched"}
 {"parcel": "toy4-shepherd", "status": "verdict", "caught": 5, "plants": 5, "extra_findings": [], "verifier_report": "scratch/toy2/verify-shepherd.md", "checked_by": "lead-merge"}
 {"parcel": "toy5-display", "parcel_commit": "445e1a79fa55fca9b8e8f54d0e6079d6b1d81900", "copy_head": "7595c1095f88376ad0547ca5cea2bb196e0f1cd5", "plants": 5, "key_sha256": "75c09474356e0f24205377f473854329f248f185c896ababd6b8dabe9b3af102", "checked_by": "lead-merge", "status": "dispatched"}
+{"parcel": "toy5-display", "status": "verdict", "caught": 5, "plants": 5, "extra_findings": [], "verifier_report": "scratch/toy2/verify-display.md", "checked_by": "lead-merge"}
