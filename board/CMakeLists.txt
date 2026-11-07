@@ -186,6 +186,13 @@ file(GLOB LIB_SRC ${LIB}/src/*.c)
 option(TOY_CKPT_FLASH_SELFTEST
     "Compile the (uncalled) flash checkpoint round-trip selftest" OFF)
 
+# toy_product boot glass self-test (board/main_product.c): three
+# ~1.5 s solid-colour stages after panel init, before attract,
+# for black-glass triage on hardware. OFF for shipped builds;
+# ON only for a diagnostic flash candidate.
+option(TOY_PROD_SELFTEST
+    "Boot glass self-test stages in toy_product (diagnostic)" OFF)
+
 add_executable(toy_board
     main_board.c
     clock_board.c
@@ -353,4 +360,78 @@ if(_toy_platform_actual STREQUAL "rp2350")
     pico_enable_stdio_usb(toy_sensor_test 1)
     pico_enable_stdio_uart(toy_sensor_test 0)
     pico_add_extra_outputs(toy_sensor_test)
+endif()
+
+# Product firmware (toy5-presenter): presenter + attract
+# rotation on glass (board/main_product.c, board/presenter.*,
+# board/DISPLAY.md addendum). RP2350 only, like toy_display_test
+# above, so the RP2040 configure never sees it. This block is
+# deliberately self-contained (own source list, own pins) so a
+# sibling target appended below it unions trivially.
+if(_toy_platform_actual STREQUAL "rp2350")
+    add_executable(toy_product
+        main_product.c
+        presenter.c
+        display_co5300.c
+        display_qspi_pio.c
+        ${TOY_ROOT}/core/toy_fb.c
+        ${TOY_ROOT}/core/toy_carts.c
+        ${TOY_ROOT}/core/toy_input.c
+        ${TOY_ROOT}/core/cart_fig8.c
+        ${TOY_ROOT}/core/cart_pendulum.c
+        ${TOY_ROOT}/core/cart_carousel.c
+        ${TOY_ROOT}/core/cart_stagnation.c
+        ${TOY_ROOT}/core/cart_microscope.c
+        ${TOY_ROOT}/core/cart_harmonograph.c
+        ${TOY_ROOT}/core/cart_lorenz.c
+        ${TOY_ROOT}/core/cart_intervallens.c
+        ${TOY_ROOT}/core/cart_pendwave.c
+        ${TOY_ROOT}/core/cart_orrery.c
+        ${TOY_ROOT}/core/cart_cloud.c
+        ${TOY_ROOT}/core/cart_mandelbrot.c
+        ${TOY_ROOT}/core/toy_fft.c
+        ${TOY_ROOT}/core/toy_signal.c
+        ${TOY_ROOT}/core/cart_orbitspec.c
+        ${TOY_ROOT}/core/cart_julia.c
+        ${TOY_ROOT}/core/cart_gravity.c
+        ${TOY_ROOT}/core/cart_gpend.c
+        ${TOY_ROOT}/core/cart_seismo.c
+        ${TOY_ROOT}/core/cart_attitude.c
+        ${TOY_ROOT}/core/cart_synspec.c
+        ${TOY_ROOT}/core/cart_heartbeat.c
+        ${TOY_ROOT}/core/cart_solclock.c
+        ${TOY_ROOT}/core/cart_pond.c
+        ${TOY_ROOT}/core/cart_shepherd.c
+        ${LIB_SRC}
+    )
+    pico_generate_pio_header(toy_product
+        ${CMAKE_CURRENT_LIST_DIR}/display_qspi.pio)
+    target_include_directories(toy_product PRIVATE
+        ${LIB}/include ${TOY_ROOT}/core ${CMAKE_CURRENT_LIST_DIR})
+    target_compile_definitions(toy_product PRIVATE
+        TOY_GIT_HEAD="${TOY_GIT_HEAD}")
+    if(TOY_PROD_SELFTEST)
+        target_compile_definitions(toy_product PRIVATE TOY_PROD_SELFTEST=1)
+    endif()
+    # Explicit stack reservation (crt0 .stack spacer in
+    # SCRATCH_Y; main_product.c prints the reserved size from
+    # __StackTop-__StackBottom as boot evidence). Presenter
+    # mode override for the RAM-decision reproduction build:
+    # -DTOY_PRESENTER_MODE_FULL466=1 (see board/presenter.h).
+    target_compile_definitions(toy_product PRIVATE PICO_STACK_SIZE=4096)
+    if(DEFINED TOY_PRESENTER_MODE_FULL466)
+        target_compile_definitions(toy_product PRIVATE
+            TOY_PRESENTER_MODE_FULL466=${TOY_PRESENTER_MODE_FULL466})
+    endif()
+    target_compile_options(toy_product PRIVATE -O2)
+    target_link_libraries(toy_product
+        pico_stdlib pico_unique_id hardware_pio)
+    # Same no-hardware-float discipline as toy_board (audit
+    # above): sim maths stays muse-softfloat integer code; the
+    # presenter/upscale path is integer-only by construction.
+    pico_set_float_implementation(toy_product none)
+    pico_set_double_implementation(toy_product compiler)
+    pico_enable_stdio_usb(toy_product 1)
+    pico_enable_stdio_uart(toy_product 0)
+    pico_add_extra_outputs(toy_product)
 endif()
