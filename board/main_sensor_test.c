@@ -6,16 +6,19 @@
  *
  * Bus: I2C1, SDA GPIO6, SCL GPIO7, 400 kHz (shared by all
  * five scanned devices; see board/SENSORS.md for the roster).
- * Pins: touch INT GPIO22 / RST GPIO23, IMU INT1/2 GPIO28/29
- * (unused, poll-based), RTC INT GPIO27 (unused). GPIO25 is
+ * Pins: touch INT GPIO22 (active-low; level-polled every
+ * loop pass and used to gate report reads - no IRQ) / RST
+ * GPIO23, IMU INT1/2 GPIO28/29 (unused, poll-based), RTC
+ * INT GPIO27 (unused). GPIO25 is
  * never touched (UART1 RX on this board); the status LED
  * follows TOY_BOARD_LED_PIN exactly as main_board.c.
  *
  * Phases (SENSORS.md documents expected output + owner
  * actions): 0 bus scan, 1 IMU id+init, 2 RTC init+read,
- * 3 touch reset+id, 4 AXP2101 read-only ID + codec presence
- * note, 5 bounded 60 s live loop (RTC 1 Hz, IMU ~10 Hz,
- * touch DOWN/MOVE/UP as they change, optional serial SET
+ * 3 touch reset+id+verified normal-mode entry, 4 AXP2101
+ * read-only ID + codec presence note, 5 bounded 60 s live
+ * loop (RTC 1 Hz, IMU ~10 Hz, INT-gated touch reads with
+ * DOWN/MOVE/UP as they change, optional serial SET
  * command for the RTC), 6 summary then idle.
  *
  * SET command (type it into the CDC terminal during phase
@@ -159,8 +162,11 @@ static int phase_touch(cst9217_config_t *cfg)
            (unsigned long)info.checksum, (unsigned long)info.check_code,
            rc == 0 ? "OK" : "FAIL", CST9217_CHIP_ID_EXPECT);
     int rc2 = cst9217_enter_normal(cfg);
-    printf("TOUCH normal=%s int_level=%d\n", rc2 == 0 ? "OK" : "FAIL",
-           cst9217_int_level(cfg) ? 1 : 0);
+    printf("TOUCH normal=%s rc=%d int_level=%d (rc %d=echo-mismatch "
+           "%d=nack; int idle=1, asserted=0)\n",
+           rc2 == 0 ? "OK" : "FAIL", rc2,
+           cst9217_int_level(cfg) ? 1 : 0,
+           CST9217_ERR_MODE, CST9217_ERR_NACK);
     return rc ? rc : rc2;
 }
 
@@ -278,13 +284,17 @@ int main(void)
     touch_track_t tracks[CST9217_MAX_POINTS];
     memset(tracks, 0, sizeof tracks);
     bool dumped_contact = false, dumped_release = false;
+    bool dumped_no_report = false;
     unsigned imu_ok = 0, imu_err = 0, rtc_err = 0;
-    unsigned t_down = 0, t_up = 0, touch_err = 0;
+    unsigned t_down = 0, t_up = 0;
+    unsigned touch_nack = 0, touch_no_report = 0, touch_int_falls = 0;
+    bool touch_pending = false, prev_int_high = true;
     char line[48];
     size_t line_len = 0;
 
     uint32_t start = to_ms_since_boot(get_absolute_time());
     uint32_t next_imu = start, next_rtc = start, next_touch = start;
+    uint32_t next_touch_probe = start; /* 1 Hz ungated fallback */
     uint32_t next_beat = start + 10000u;
     while (to_ms_since_boot(get_absolute_time()) - start < LIVE_MS) {
         uint32_t now = to_ms_since_boot(get_absolute_time());
@@ -341,12 +351,38 @@ int main(void)
                 rtc_err++;
         }
 
-        if (touch_rc == 0 && now >= next_touch) {
-            next_touch = now + 20u; /* ~50 Hz poll */
+        /* INT is active-low, falling edge = report ready
+         * (vendor flow). Sample every pass (GPIO only, no
+         * I2C) and latch the assertion for the gated read. */
+        if (touch_rc == 0) {
+            bool lvl_high = cst9217_int_level(&touch_cfg);
+            if (cst9217_int_fell(prev_int_high, lvl_high))
+                touch_int_falls++;
+            if (cst9217_int_is_asserted(lvl_high))
+                touch_pending = true;
+            prev_int_high = lvl_high;
+        }
+
+        bool any_active = tracks[0].active || tracks[1].active;
+        if (touch_rc == 0 && now >= next_touch &&
+            cst9217_should_read(touch_pending, any_active,
+                                now >= next_touch_probe)) {
+            next_touch = now + 20u; /* ~50 Hz max read cadence */
+            next_touch_probe = now + 1000u;
+            touch_pending = false;
             cst9217_report_t rep;
             uint8_t raw[CST9217_REPORT_LEN];
-            if (cst9217_read_report(&touch_cfg, &rep, raw) != 0) {
-                touch_err++;
+            int trc = cst9217_read_report(&touch_cfg, &rep, raw);
+            if (trc == CST9217_NO_REPORT) {
+                /* All-FF window: nothing latched. Counted
+                 * apart from NACKs; never a release frame. */
+                touch_no_report++;
+                if (!dumped_no_report) {
+                    print_raw("first-no-report-ff", raw);
+                    dumped_no_report = true;
+                }
+            } else if (trc != CST9217_OK) {
+                touch_nack++;
             } else if (!rep.empty) {
                 bool now_active[CST9217_MAX_POINTS] = { false, false };
                 uint16_t nx[CST9217_MAX_POINTS] = { 0, 0 };
@@ -411,8 +447,10 @@ int main(void)
     }
 
     printf("SENSOR-TEST PHASE 6 done imu_ok=%u imu_err=%u rtc_err=%u "
-           "touch_down=%u touch_up=%u touch_err=%u\n",
-           imu_ok, imu_err, rtc_err, t_down, t_up, touch_err);
+           "touch_down=%u touch_up=%u touch_nack=%u "
+           "touch_no_report_ff=%u touch_int_falls=%u\n",
+           imu_ok, imu_err, rtc_err, t_down, t_up, touch_nack,
+           touch_no_report, touch_int_falls);
     printf("SENSOR-TEST DONE (idle; reset to run again)\n");
     for (;;) {
         LED_TOGGLE();

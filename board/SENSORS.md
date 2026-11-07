@@ -39,15 +39,18 @@ Sources: Waveshare schematic
 `RP2350-Touch-AMOLED-1.75.pdf` and the linked datasheets
 (QMI8658C Rev B via QST, PCF85063A Rev 7 via Waveshare/NXP)
 from the product resources page. The CST9217 has no datasheet
-linked there and no public PDF was reachable; its register
-facts come from the family reference flow preserved in
-SensorLib `TouchDrvCST92xx` (as shipped in Waveshare BSPs) and
-cross-checked against the independent Rust `cst92xx` crate,
-which cites the CST9217 datasheet §10.5 for reset timing. Both
-were consulted for hardware facts only; all code here is
-original, and the test firmware prints raw report bytes so a
-wrong assumption shows itself on the first run instead of
-hiding.
+linked there and no public PDF was reachable (re-checked
+2026-11-07 for the touchfix); its register facts come from
+the family reference flow preserved in SensorLib
+`TouchDrvCST92xx` (as shipped in Waveshare BSPs), the
+independent Rust `cst92xx` crate (cites the CST9217 datasheet
+§10.5 for reset timing), and Waveshare's own CST9217 driver
+for this exact board (GitHub `waveshareteam/RP2350-Touch-
+AMOLED-1.75`, `examples/C/01_GUI/lib/Touch/CST9217.c` +
+`main.c`). All were consulted for hardware facts only; all
+code here is original, and the test firmware prints raw
+report bytes so a wrong assumption shows itself on the first
+run instead of hiding.
 
 ## QMI8658C IMU (`imu_qmi8658.*`)
 
@@ -130,27 +133,64 @@ Registers are 16-bit, sent big-endian; payloads little-endian.
 
 | Register | Use |
 |---|---|
-| `0xD000` | Touch report: read 15 bytes; ack non-empty reports by writing `{0xD0, 0x00, 0xAB}` |
+| `0xD000` | Touch report: read 15 bytes; ack real (non-empty, non-all-FF) reports by writing `{0xD0, 0x00, 0xAB}` |
 | `0xD101` | Enter debug/info (command) mode before attribute reads |
-| `0xD106` | Disable low-power scan. Without this, reports starve ~10 s after boot — fatal to a 60 s poll test |
-| `0xD109` | Normal scanning mode |
+| `0xD106` | "Disable low-power scan" — defined in the SensorLib/Rust headers but written by **neither** reference and not by Waveshare's board driver. This driver does not write it (see touchfix note below) |
+| `0xD109` | Normal scanning mode — only via the verified handshake below |
+| `0xD11E` | Mode-switch handshake register (SensorLib `setMode`) |
+| `0x0002` | Mode status echo: byte 1 repeats the low byte of the last accepted mode command |
 | `0xD1F8` | Resolution: u16le X, u16le Y (expect 466×466) |
-| `0xD1FC` | Firmware checkcode: u32le (printed, not validated — no public rule to validate against) |
+| `0xD1FC` | Firmware checkcode: u32le, high half `0xCACA` (live board read `0xcaca4e20`, matching the reference validation rule) |
 | `0xD204` | u16le project ID, u16le chip type (expect `0x9217`; `0x9220` accepted as same-family) |
 | `0xD208` | u32le firmware version, u32le checksum |
 
 Reset: RST (GPIO23) low 10 ms, then 100 ms settle (datasheet
-TRST ≈0.1 ms / TRON ≈100 ms via the `cst92xx` citation).
-INT (GPIO22) is configured as an input and its level is
-readable via `cst9217_int_level()`; no IRQ is registered.
+TRST ≈0.1 ms / TRON ≈100 ms via the `cst92xx` citation;
+Waveshare's driver uses 10 ms + 50 ms + 30 ms, covered).
+INT (GPIO22) is input **with pull-up**, active-low, idle
+high: a falling edge means a report is ready (Waveshare's
+board example registers a `GPIO_IRQ_EDGE_FALL` IRQ after
+`DEV_KEY_Config`'s `gpio_pull_up`; SensorLib's default
+`irqTriggerLevel` is also LOW). No IRQ is registered here;
+the test firmware level-polls INT every loop pass and
+gates report reads on assertion.
 
-Mode-return caveat, stated plainly: `cst9217_enter_normal()`
-writes `0xD109` then `0xD106` directly, without the fuller
-mode-handshake dance (`0xD11E` + status echo at `0x0002`) that
-the reference `setMode` performs. If touch is silent on the
-board while identity reads succeed, this is the first suspect;
-the raw-report dumps in phase 5 will show whether reports flow
-at all.
+**Mode entry is the verified `setMode` handshake**
+(`cst9217_enter_normal()`), re-derived in the touchfix
+after the first live run (identity OK, `normal=OK`, then
+60 s of all-`0xFF` report reads and 1509 anonymous
+errors):
+
+| Step | Transfer | Check |
+|---|---|---|
+| Handshake (≤3 attempts, 200 ms back-off on transfer failure) | write `D1 1E`, write `D1 1E` again (two STOP-terminated writes), read 4 B at `0x0002` | byte 1 == `0x1E` |
+| Mode write | write `D1 09` (`0xD109`), read 2 B at `0x0002` | byte 1 == `0x09` |
+| Settle | 10 ms | — |
+
+If an echo never matches, entry **fails**
+(`CST9217_ERR_MODE = -4`; a trailing transfer failure
+surfaces as `CST9217_ERR_NACK = -2` instead) and phase 3
+prints `normal=FAIL rc=<n>` — transfer success alone no
+longer prints OK. (SensorLib's original falls through
+and writes the mode even when no attempt echoed; the
+Rust flow's fail-closed behaviour is followed here.)
+Facts: SensorLib `TouchDrvCST92xx::setMode` and Rust
+`cst92xx` `set_mode`/`REG_MODE_HANDSHAKE`/`REG_MODE_STATUS`.
+Waveshare's own board driver writes no normal-mode
+command at all and still receives reports after the
+`0xD101` attribute read, so the attribute window alone
+does not block reports — the handshake is used because
+it is the only mode entry any source proves with a
+readback, and its failure is visible.
+
+Register reads everywhere: write the 2 address bytes
+(big-endian) with repeated start (no STOP), then read.
+Read outcomes are named, never anonymous:
+`CST9217_OK` (frame decoded, possibly all-zero empty),
+`CST9217_NO_REPORT` (window read all-`0xFF`: nothing
+latched — counted as `touch_no_report_ff`, never acked,
+never treated as a release), `CST9217_ERR_NACK` (any
+transfer failed — counted as `touch_nack`).
 
 ### Report byte layout (15-byte read, ≤2 points)
 
@@ -167,19 +207,27 @@ at all.
 | 11–14 | Unused tail of the fixed-size read |
 
 Decode rules (`cst9217_parse_report`, host-tested): all-zero =
-no new report (never acked); byte 6 ≠ `0xAB` = torn/stale,
-dropped; only event nibble `0x06` counts as an active contact;
-if slot 0 is not an accepted contact the whole frame is
-discarded (reference-driver rule). Coordinates are raw 12-bit
-panel values, **0..465** on this 466×466 glass; the parser
-does not clamp, and `cst9217_report_in_panel()` flags strays.
+no new report (never acked); all-`0xFF` = nothing latched
+(`all_ff`, never acked, never a release frame); byte 6 ≠ `0xAB`
+= torn/stale, dropped; only event nibble `0x06` counts as an
+active contact; if slot 0 is not an accepted contact the whole
+frame is discarded (reference-driver rule). This layout is
+confirmed byte-for-byte by all three sources (SensorLib
+`getTouchPoints`, Rust `decode_touch_report`, Waveshare
+`CST9217_Read_Data`); the first live failure was **not** a
+layout error. Coordinates are raw 12-bit panel values,
+**0..465** on this 466×466 glass; the parser does not clamp,
+and `cst9217_report_in_panel()` flags strays.
 
 There is no accepted "up" event code: a release appears as the
 track vanishing (or a no-contact frame). **DOWN/MOVE/UP are
 derived by the caller** from successive reports — see phase 5.
-Whether x/y need mirroring into display space is a first-run
-observation (some CST9217 boards invert both axes); the driver
-reports controller space unchanged.
+For display space, Waveshare's driver for this board mirrors
+both axes (`466 - x`, `466 - y`, i.e. 465-based `465 - x` up
+to their off-by-one convention); the driver here still
+reports controller space unchanged, and integration applies
+the mirror. The first live run produced no contact frames,
+so the mirror is vendor-stated, not yet owner-observed.
 
 ## PCF85063A RTC (`rtc_pcf85063.*`)
 
@@ -253,7 +301,7 @@ RTC <date> <time> wday=<n> os=1 valid=1 (os=1: time not trusted until set)
 SENSOR-TEST PHASE 3 touch CST9217 addr=0x5a rst=23 int=22
 TOUCH reset=OK
 TOUCH chip=0x9217 project=0x<....> res=466x466 fw=0x<........> csum=0x<........> check=0x<........> info=OK (expect chip=0x9217 res=466x466)
-TOUCH normal=OK int_level=<0|1>
+TOUCH normal=OK rc=0 int_level=1 (rc -4=echo-mismatch -2=nack; int idle=1, asserted=0)
 SENSOR-TEST PHASE 4 pmic+codec (read-only; nothing written)
 AXP2101 id_reg03=0x4a (expect 0x4a) read-only
 ES8311 present at 0x18 by scan only; codec registers untouched
@@ -277,13 +325,22 @@ Phase 5 (60 s, then it stops on its own). Owner script:
    Gravity should walk across axes, always |a| ≈ 1 g.
 3. **Tap the desk / flick a rotation**: gyro channels should
    spike and settle; a sharp tap shows as an accel transient.
-4. **Touch**: tap once (expect `TOUCH RAW first-contact: …`
-   once, then `TOUCH DOWN id=0 x=<0..465> y=<0..465> int=<…>`),
-   hold and **drag slowly** corner to corner (`TOUCH MOVE …`,
-   printed when the point moves ≥2 px; check the extremes
-   approach 0 and 465 and note any axis mirroring), lift
+4. **Touch** (reads are INT-gated: the firmware watches the
+   active-low INT line and reads on assertion, with a 1 Hz
+   ungated probe as fallback): tap once (expect
+   `TOUCH RAW first-contact: …` once, then
+   `TOUCH DOWN id=0 x=<0..465> y=<0..465> int=<…>`), hold and
+   **drag slowly** corner to corner (`TOUCH MOVE …`, printed
+   when the point moves ≥2 px; check the extremes approach 0
+   and 465 and note any axis mirroring), lift
    (`TOUCH RAW first-no-contact: …` once, then `TOUCH UP …`).
-   Try a second finger (`id=1`).
+   Try a second finger (`id=1`). If touch is still broken,
+   phase 6 now separates the evidence instead of one error
+   count: `touch_int_falls` (does INT ever assert?),
+   `touch_no_report_ff` (reads succeed but the window is
+   all-`0xFF`; first one dumped as
+   `TOUCH RAW first-no-report-ff: …`), `touch_nack`
+   (transfers failing).
 5. **RTC**: watch the 1 Hz `RTC …` lines count seconds
    steadily. Optionally send `SET YYYY-MM-DD HH:MM:SS W`
    (real current time; W = weekday 0–6 in any consistent
@@ -293,7 +350,7 @@ Phase 5 (60 s, then it stops on its own). Owner script:
 
 ```
 SENSOR-TEST live 10s/60s (keep tapping/tilting)   (every 10 s)
-SENSOR-TEST PHASE 6 done imu_ok=<~600> imu_err=0 rtc_err=0 touch_down=<n> touch_up=<n> touch_err=0
+SENSOR-TEST PHASE 6 done imu_ok=<~600> imu_err=0 rtc_err=0 touch_down=<n> touch_up=<n> touch_nack=0 touch_no_report_ff=<n> touch_int_falls=<n>
 SENSOR-TEST DONE (idle; reset to run again)
 ```
 
@@ -310,13 +367,19 @@ failures from silence.
   full-scale edges), burst parse, CST reports (no-touch,
   single/multi-touch, 0/465 extremes, bad echo, cover guard,
   first-slot rule, truncation), PCF BCD (bad nibbles,
-  masks, range gate, round-trips).
+  masks, range gate, round-trips). Touchfix adds:
+  mode-handshake framing/echo bytes, named FF/NACK outcomes,
+  INT predicates + gating, all-FF parser classification
+  (225 checks total, PASS).
 - RP2350 fresh-dir build (SDK platform `rp2350-arm-s`, board
   `pico2`, `-DTOY_BOARD_LED_PIN=-1`): zero warning lines;
   no `__aeabi_f*`/`__aeabi_d*` in the four sensor objects
   (only integer `__aeabi_uldivmod`); zero VFP/DCP mnemonics in
   the ELF disassembly. UF2 74,752 B / BIN 36,988 B
-  (text 41,080 B).
+  (text 41,080 B). Touchfix rebuild (`build/touchfix-rp2350`):
+  zero warnings, UF2 76,288 B / BIN 37,644 B,
+  SHA-256(uf2) `92035d2a…3454` (full hash in the parcel
+  report's fix section).
 - RP2040 fresh configure: succeeds with **no**
   `toy_sensor_test` target; `toy_board` unchanged.
 - Nothing was flashed by this parcel. On-board proof is the

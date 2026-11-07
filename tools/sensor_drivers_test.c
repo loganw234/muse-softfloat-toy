@@ -202,6 +202,130 @@ static void test_cst_parse(void)
     CHECK(rep.empty && rep.num_points == 0);
 }
 
+/* Mode-entry framing, INT gating, and the FF/NACK split.
+ * Added for the touchfix: the first live run printed
+ * "normal=OK" for bare un-verified mode writes and then
+ * counted 1509 anonymous touch errors while the report
+ * window read all-0xFF. These checks pin the exact
+ * setMode handshake bytes (SensorLib TouchDrvCST92xx
+ * setMode: 0xD11E twice, 0x0002 echo in byte 1, mode
+ * write, echo again), the active-low INT predicates the
+ * firmware gates reads on, and the named classification
+ * of an all-FF window vs a transfer NACK. */
+static void test_cst_mode_and_classify(void)
+{
+    uint8_t f[3];
+
+    /* register framing: 16-bit address, big-endian */
+    cst9217_put_reg(CST9217_REG_MODE_HANDSHAKE, f);
+    CHECK(f[0] == 0xD1 && f[1] == 0x1E);
+    cst9217_put_reg(CST9217_REG_MODE_STATUS, f);
+    CHECK(f[0] == 0x00 && f[1] == 0x02);
+    cst9217_put_reg(CST9217_REG_NORMAL_MODE, f);
+    CHECK(f[0] == 0xD1 && f[1] == 0x09);
+    cst9217_put_reg(CST9217_REG_READ, f);
+    CHECK(f[0] == 0xD0 && f[1] == 0x00);
+    cst9217_put_reg(CST9217_REG_DEBUG_MODE, f);
+    CHECK(f[0] == 0xD1 && f[1] == 0x01);
+
+    /* ack frame {D0, 00, AB} */
+    cst9217_ack_frame(f);
+    CHECK(f[0] == 0xD0 && f[1] == 0x00 && f[2] == 0xAB);
+
+    /* handshake shape: 3 attempts (SensorLib loop bound) */
+    CHECK(CST9217_MODE_RETRIES == 3u);
+    CHECK(CST9217_MODE_RETRY_MS == 200u);
+    CHECK(CST9217_MODE_SETTLE_MS == 10u);
+
+    /* entry-sequence byte plan, in .c execution order:
+     * write D11E, write D11E, read 0x0002 (echo 0x1E),
+     * write D109, read 0x0002 (echo 0x09) */
+    static const uint16_t seq[5] = {
+        CST9217_REG_MODE_HANDSHAKE, CST9217_REG_MODE_HANDSHAKE,
+        CST9217_REG_MODE_STATUS, CST9217_REG_NORMAL_MODE,
+        CST9217_REG_MODE_STATUS
+    };
+    static const uint8_t seq_bytes[5][2] = {
+        {0xD1, 0x1E}, {0xD1, 0x1E}, {0x00, 0x02},
+        {0xD1, 0x09}, {0x00, 0x02}
+    };
+    for (unsigned i = 0; i < 5u; i++) {
+        cst9217_put_reg(seq[i], f);
+        CHECK(f[0] == seq_bytes[i][0] && f[1] == seq_bytes[i][1]);
+    }
+
+    /* echo verification: byte 1 must repeat the command's
+     * low byte; byte 0 is not part of the check */
+    static const uint8_t hs_ok[4] = {0x00, 0x1E, 0xAA, 0x55};
+    CHECK(cst9217_mode_echo_ok(hs_ok, 4, CST9217_REG_MODE_HANDSHAKE));
+    static const uint8_t norm_ok[2] = {0xFF, 0x09};
+    CHECK(cst9217_mode_echo_ok(norm_ok, 2, CST9217_REG_NORMAL_MODE));
+    /* the live failure would look like this: echo never matches */
+    static const uint8_t bad[4] = {0x00, 0x01, 0x00, 0x00};
+    CHECK(!cst9217_mode_echo_ok(bad, 4, CST9217_REG_MODE_HANDSHAKE));
+    CHECK(!cst9217_mode_echo_ok(bad, 2, CST9217_REG_NORMAL_MODE));
+    CHECK(!cst9217_mode_echo_ok(hs_ok, 1, CST9217_REG_MODE_HANDSHAKE));
+    CHECK(!cst9217_mode_echo_ok(NULL, 4, CST9217_REG_MODE_HANDSHAKE));
+
+    /* named outcomes: distinct values, NO_REPORT not an error */
+    CHECK(CST9217_OK == 0);
+    CHECK(CST9217_NO_REPORT == 1);
+    CHECK(CST9217_ERR_NACK == -2);
+    CHECK(CST9217_ERR_MODE == -4);
+    CHECK(CST9217_NO_REPORT != CST9217_ERR_NACK);
+    CHECK(CST9217_ERR_MODE != CST9217_ERR_NACK);
+
+    /* INT predicates: idle high, asserted low */
+    CHECK(!cst9217_int_is_asserted(true));
+    CHECK(cst9217_int_is_asserted(false));
+    CHECK(cst9217_int_fell(true, false));
+    CHECK(!cst9217_int_fell(true, true));
+    CHECK(!cst9217_int_fell(false, false));
+    CHECK(!cst9217_int_fell(false, true)); /* release edge: no read */
+
+    /* read gating: pending INT, active tracking, or the
+     * slow probe; idle with none of them does no I2C */
+    CHECK(cst9217_should_read(true, false, false));
+    CHECK(cst9217_should_read(false, true, false));
+    CHECK(cst9217_should_read(false, false, true));
+    CHECK(!cst9217_should_read(false, false, false));
+
+    /* buffer classification: zero vs FF vs mixed */
+    uint8_t buf[CST9217_REPORT_LEN];
+    memset(buf, 0x00, sizeof buf);
+    CHECK(cst9217_buf_all_zero(buf, sizeof buf));
+    CHECK(!cst9217_buf_all_ff(buf, sizeof buf));
+    memset(buf, 0xFF, sizeof buf);
+    CHECK(cst9217_buf_all_ff(buf, sizeof buf));
+    CHECK(!cst9217_buf_all_zero(buf, sizeof buf));
+    buf[7] = 0x00; /* one non-FF byte: a (garbage) frame, not NO_REPORT */
+    CHECK(!cst9217_buf_all_ff(buf, sizeof buf));
+    CHECK(!cst9217_buf_all_zero(buf, sizeof buf));
+    CHECK(!cst9217_buf_all_zero(NULL, sizeof buf));
+    CHECK(!cst9217_buf_all_ff(NULL, sizeof buf));
+    CHECK(!cst9217_buf_all_zero(buf, 0));
+    CHECK(!cst9217_buf_all_ff(buf, 0));
+
+    /* parser: all-FF is empty+all_ff, never a release frame */
+    cst9217_report_t rep;
+    memset(buf, 0xFF, sizeof buf);
+    cst9217_parse_report(buf, sizeof buf, &rep);
+    CHECK(rep.empty && rep.all_ff && !rep.valid && rep.num_points == 0);
+
+    /* parser: all-zero stays plain empty, all_ff clear */
+    memset(buf, 0x00, sizeof buf);
+    cst9217_parse_report(buf, sizeof buf, &rep);
+    CHECK(rep.empty && !rep.all_ff && rep.num_points == 0);
+
+    /* parser: a real contact frame is neither empty nor all_ff */
+    memset(buf, 0, sizeof buf);
+    put_point(buf, 0, 0, CST9217_EVENT_CONTACT, 100, 200);
+    buf[5] = 1;
+    buf[6] = CST9217_ACK;
+    cst9217_parse_report(buf, sizeof buf, &rep);
+    CHECK(rep.valid && !rep.empty && !rep.all_ff && rep.num_points == 1);
+}
+
 /* --- PCF85063 BCD + time registers -------------------------------- */
 
 static void test_rtc_bcd(void)
@@ -294,6 +418,7 @@ int main(void)
     test_qmi_convert();
     test_qmi_burst();
     test_cst_parse();
+    test_cst_mode_and_classify();
     test_rtc_bcd();
     test_rtc_regs();
     if (failures == 0)
