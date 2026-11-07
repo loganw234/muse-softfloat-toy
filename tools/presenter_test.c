@@ -19,7 +19,14 @@
  *      reference framebuffer (emu-frames runner shape);
  *   4. end-to-end flush: the reconstructed 466x466 glass image
  *      equals the reference 360 framebuffer sampled through the
- *      independently formulated map, for harmonograph and fig8.
+ *      independently formulated map, for harmonograph and fig8;
+ *   5. the precomputed col/row maps (toy5-pace): every one of
+ *      the 466 entries equals both the pinned integer formula
+ *      and the independent double formulation, expand_row via
+ *      the map is pixel-identical to the direct formula, a
+ *      full-frame pattern flushed through the map matches the
+ *      independent sampling, and the repeated-row cache never
+ *      serves a stale row across flushes.
  *
  * Build (from repo root, Git Bash): gcc -O2 -std=c11 -Wall
  * -Wextra -Werror, includes libs/muse-softfloat/include, core
@@ -350,10 +357,73 @@ static void test_persistence(void)
     CHECK(fb->px[(size_t)180 * 360 + 180] != 0xffffu);
 }
 
+/* Precomputed-map path (toy5-pace). The maps are the flush
+ * path's only source of coordinates now, so pin them against
+ * BOTH references for every glass coordinate, pin expand_row
+ * against the direct formula, and pin the row cache: mutate
+ * a source row that covers two glass rows between flushes -
+ * a cache that survived across flushes would show the old row
+ * twice and fail check_glass_matches. */
+static void test_col_map(void)
+{
+    /* Standalone builder and the presenter's own maps. */
+    uint16_t map[466];
+    toy_presenter_build_map(map, 360, 466);
+    int repeats = 0;
+    for (int d = 0; d < 466; d++) {
+        int formula = toy_presenter_src_coord(d, 360, 466);
+        CHECK(map[d] == formula);
+        CHECK(map[d] == map_ref(d, 360, 466));
+        CHECK(presenter.col_src[d] == formula);
+        CHECK(presenter.row_src[d] == formula);
+        if (d > 0 && presenter.row_src[d] == presenter.row_src[d - 1])
+            repeats++;
+    }
+    /* Monotone-surjective 360 -> 466: exactly 106 repeated
+     * rows for the flush cache to reuse. */
+    CHECK(repeats == 106);
+    CHECK(presenter.cached_sy == -1);
+
+    /* expand_row via the map == direct formula, every column. */
+    uint16_t src[360], dst[466];
+    for (int x = 0; x < 360; x++)
+        src[x] = (uint16_t)(x * 37u + 11u);
+    toy_presenter_expand_row(src, presenter.col_src, dst, 466);
+    for (int dx = 0; dx < 466; dx++) {
+        CHECK(dst[dx] == src[toy_presenter_src_coord(dx, 360, 466)]);
+        CHECK(dst[dx] == src[map_ref(dx, 360, 466)]);
+    }
+
+    /* Full-frame pattern through the real flush, then mutate
+     * the source row behind a repeated glass-row pair and
+     * flush again: the new content must land on both rows. */
+    toy_fb_t *fb = toy_presenter_fb(&presenter);
+    for (int y = 0; y < 360; y++)
+        for (int x = 0; x < 360; x++)
+            fb->px[(size_t)y * 360 + (size_t)x] =
+                (uint16_t)((unsigned)(x + 1) * 40503u ^
+                           (unsigned)(y + 1) * 257u ^ (unsigned)(x ^ y));
+    flush_capture();
+    check_glass_matches(fb);
+
+    int rep_sy = -1;
+    for (int d = 1; d < 466; d++)
+        if (presenter.row_src[d] == presenter.row_src[d - 1]) {
+            rep_sy = presenter.row_src[d];
+            break;
+        }
+    CHECK(rep_sy >= 0);
+    for (int x = 0; x < 360; x++)
+        fb->px[(size_t)rep_sy * 360 + (size_t)x] = 0xffe0u;
+    flush_capture();
+    check_glass_matches(fb);
+}
+
 int main(void)
 {
     test_src_coord();
     setup_presenter();
+    test_col_map();
     test_crafted_pixels();
     test_persistence();
     test_cart_sequence("harmonograph", 30, 1);

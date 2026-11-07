@@ -51,6 +51,15 @@
  * squares share the glass centre by construction: src centre
  * 179.5 maps between dst 232/233, the glass centre pair).
  * tools/presenter_test.c pins this mapping pixel-for-pixel.
+ *
+ * Pacing (toy5-pace): the per-pixel division is gone from the
+ * flush path. toy_presenter_init precomputes the 466-entry
+ * column map and row map from the pinned formula above (932
+ * divisions, once); row expansion and row selection during
+ * flush are table lookups. Consecutive glass rows that map to
+ * the same source row (466-360 = 106 of them) reuse the last
+ * expanded row; the cache is reset at the start of every
+ * flush, so it can never serve a stale row across frames.
  */
 #ifndef PRESENTER_H
 #define PRESENTER_H
@@ -88,6 +97,17 @@ typedef struct {
     /* One expanded glass row (upscale flush); unused in full
      * mode but kept so the struct is mode-independent. */
     uint16_t row[CO5300_WIDTH];
+    /* Precomputed source maps (toy5-pace): col_src[dx] and
+     * row_src[dy] hold toy_presenter_src_coord for every glass
+     * coordinate, built once by toy_presenter_init. Identity
+     * in full mode. 2 * 466 * 2 = 1,864 B. */
+    uint16_t col_src[CO5300_WIDTH];
+    uint16_t row_src[CO5300_HEIGHT];
+    /* Source row currently expanded in row[], or -1. Reset at
+     * the start of every flush; within one flush the
+     * framebuffer does not change, so consecutive glass rows
+     * sharing a source row reuse row[] verbatim. */
+    int cached_sy;
 } toy_presenter_t;
 
 /* Bind to an initialised panel and point fb at the presenter's
@@ -108,12 +128,22 @@ int toy_presenter_blank(toy_presenter_t *p);
 
 /* Pure mapping helpers (host-testable, no panel involved).
  * Centre-aligned nearest neighbour; when src_size == dst_size
- * this is the identity. Pre: 0 <= dst < dst_size, sizes > 0. */
+ * this is the identity. Pre: 0 <= dst < dst_size, sizes > 0.
+ * This stays the one pinned formula: the precomputed maps are
+ * built from it and the host test proves them equal to it. */
 int toy_presenter_src_coord(int dst, int src_size, int dst_size);
 
-/* Expand one source row (src_w pixels) into one destination row
- * (dst_w pixels) with toy_presenter_src_coord on x. */
-void toy_presenter_expand_row(const uint16_t *src_row, int src_w,
+/* Fill map[0..dst_size) with toy_presenter_src_coord(d,
+ * src_size, dst_size). Runs the division once per destination
+ * coordinate at init so the flush path never divides. */
+void toy_presenter_build_map(uint16_t *map, int src_size, int dst_size);
+
+/* Expand one source row into one destination row (dst_w
+ * pixels) by table lookup: dst_row[dx] = src_row[col_src[dx]].
+ * No division. col_src comes from toy_presenter_build_map (in
+ * practice toy_presenter_t.col_src). */
+void toy_presenter_expand_row(const uint16_t *src_row,
+                              const uint16_t *col_src,
                               uint16_t *dst_row, int dst_w);
 
 #endif

@@ -4,10 +4,12 @@
  * SI3..SI0 with SCL as a side-set pin. Command bytes are expanded
  * with co5300_expand_cmd_byte so they leave 1-wire on SIO0; pixel
  * bytes go out as-is (two nibbles each, high first). CPU feeds the
- * FIFO with blocking puts: at 25 MHz SCL a byte lasts 320 ns, and
- * if the CPU ever falls behind the machine stretches SCL high at
- * a byte boundary, which the panel tolerates. DMA is a later
- * presenter optimisation, deliberately not D0 scope.
+ * FIFO with blocking puts: at the actual 37.5 MHz SCL (divider
+ * derivation in display_qspi_pio.h) a 1-wire command byte lasts
+ * ~213 ns (eight SCL cycles) and a pixel byte ~53 ns, and if the
+ * CPU ever falls behind the machine stretches SCL high at a byte
+ * boundary, which the panel tolerates. DMA is a later presenter
+ * optimisation, deliberately not D0 scope.
  *
  * Integer divider math only: this target keeps the RP2350
  * no-hardware-float policy (see board/CMakeLists.txt), so the

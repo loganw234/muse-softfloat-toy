@@ -27,9 +27,31 @@
 #define DISPLAY_PIN_RST 16
 #define DISPLAY_PIN_TE 17
 
-/* Target SCL rate. CO5300 datasheet 6.4.1 (p107) Note 3 caps
- * 4-wire QSPI pixel transfers at 50 MHz; D0 runs at half that. */
-#define DISPLAY_QSPI_SCL_HZ 25000000u
+/* Target SCL rate: the CO5300 datasheet cap. Datasheet
+ * V0.00 2023, section 6.4 AC Timings (p107): TSCYC clock
+ * cycle (Write) minimum 20 ns and Note 3 verbatim "The max
+ * SCL sequence of 4-wire QSPI transferring RGB888, RGB666 and
+ * RGB555 is 50Mhz" (re-verified first-hand in toy5-pace; the
+ * 20 ns TSCYC floor is format-independent and gives the same
+ * 50 MHz ceiling for the RGB565 used here). D0 ran a
+ * 25,000,000 target; toy5-pace raises the target to the cap.
+ *
+ * Divider derivation (integer divider only,
+ * sm_config_set_clkdiv_int_frac with frac 0; the PIO program
+ * spends 2 state-machine cycles per SCL period):
+ * SCL = clk_sys / (2 * div), div rounded up. At the stock
+ * 150 MHz sysclk: div = ceil(150e6 / (2 * 50e6)) = 2, so the
+ * ACTUAL rate is 37.5 MHz - the nearest below the cap. div 1
+ * would give 75 MHz (13.3 ns period, under the 20 ns TSCYC
+ * minimum). A fractional 1.5 divider would average 50 MHz
+ * but the jittered SM clock emits individual SCL cycles
+ * shorter than 20 ns, so it is deliberately not used. At
+ * 37.5 MHz the period is 26.7 ns and each half-period is
+ * 13.3 ns, above the TSCH/TSCL 6.5 ns minima (same table).
+ * display_qspi_scl_hz() reports the actual post-divider
+ * rate. Shared by toy_product and toy_display_test: the
+ * display test simply runs at the faster rate. */
+#define DISPLAY_QSPI_SCL_HZ 50000000u
 
 typedef struct display_qspi display_qspi_t;
 struct display_qspi {
