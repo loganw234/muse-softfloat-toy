@@ -51,6 +51,7 @@ typedef struct i2c_inst toy_i2c_t;
 #define PCF85063_I2C_ADDR 0x51u
 
 #define PCF85063_REG_CONTROL1 0x00u
+#define PCF85063_REG_RAM_BYTE 0x03u /* free RAM byte (datasheet register map) */
 #define PCF85063_REG_SECONDS  0x04u /* first of 7 time regs */
 #define PCF85063_TIME_REG_COUNT 7u
 
@@ -175,5 +176,16 @@ int pcf85063_set_time(toy_i2c_t *i2c, const pcf85063_time_t *t);
  * if the oscillator is truly stopped the flag will not
  * stay cleared (datasheet 8.3.1.1), which is the point. */
 int pcf85063_clear_os(toy_i2c_t *i2c);
+
+/* Set only the OS flag, preserving the seconds value: marks
+ * the held time untrusted without destroying it (the
+ * toy_clock_clear() path in board/clock_rtc.c). */
+int pcf85063_set_os(toy_i2c_t *i2c);
+
+/* The free RAM byte at 0x03: battery-backed user storage,
+ * reset value 0. clock_rtc.c keeps the tz offset there
+ * (board/clock_civil.h encoding); nothing else may use it. */
+int pcf85063_read_ram(toy_i2c_t *i2c, uint8_t *out);
+int pcf85063_write_ram(toy_i2c_t *i2c, uint8_t value);
 
 #endif

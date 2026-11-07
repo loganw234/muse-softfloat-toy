@@ -1,223 +1,459 @@
-/* main_product.c - first on-glass product firmware: presenter +
- * attract rotation (toy5-presenter).
+/* main_product.c - product firmware: the shell runner on glass
+ * (toy5-shell). Replaces the toy5-presenter attract rotation
+ * outright (it is not retained behind an option: two main
+ * loops would share nothing but boot, and the shell IS the
+ * product posture now; the attract build stays reachable in
+ * git history at the toy5-pace merge).
  *
- * Boots the CO5300 panel (board/display_co5300.* over the PIO
- * QSPI transport, glass-proven by toy_display_test), then cycles
- * every registered cartridge forever, TOY_PROD_CART_SECONDS of
- * wall clock each, in registry order. This is the LIVE runner
- * posture, not a proof:
- *   - feed carts run on their synthetic on-device source
- *     (toy_sig_proof_source_init + toy_feed_step), the same
- *     source main_board.c instantiates, boundary order
- *     feed -> apply -> step exactly as there;
- *   - the apply slot drains a live queue that stays empty in
- *     this parcel (no touch/IMU/RTC/shell yet; the sensors
- *     parcel attaches sources later). Proof scripts are NOT
- *     replayed: no scripted gestures run unattended. The one
- *     exception is step-0 setup, mirrored from emu frames mode
- *     (emu/main_emu.c applies toy_apply_proof_at(..., 0, ...)
- *     right after reset): step-0 entries are parameter setup
- *     (julia's iter pin, solclock's calendar pin), and applying
- *     them is what makes those carts look right unattended.
- *     Entries past step 0 are never applied here.
- *   - the framebuffer persists across frames within a cart
- *     (trail carts fade; see presenter.h) and is cleared, with
- *     a black fill to glass, on every cart switch;
- *   - pacing is FRAME-RATE FIRST (toy5-pace, owner decision):
- *     each presented frame steps the sim at least once, then
- *     keeps stepping until demo_steps_per_frame steps ran or
- *     the TOY_PROD_SIM_BUDGET_US budget is spent. On heavy
- *     carts the sim therefore runs slower than wall clock
- *     instead of the frame rate collapsing. State after N
- *     steps is untouched (feed/apply/step order and step-0
- *     setup unchanged); only how many steps happen per
- *     presented frame varies, which is runner-layer pacing,
- *     not cart behaviour. TOY-PROD-PACE reports steps= per
- *     window so the sim-speed ratio is
- *     steps / (frames * demo_steps_per_frame).
- * Serial (USB CDC) is output-only: TOY-PROD-* markers with
- * integer prints only. No AXP writes, GPIO25 untouched.
+ * What runs here, in the toy_shell.h runner contract order:
+ *   boot: CO5300 panel over the PIO QSPI transport (presenter
+ *   360-upscale, toy5-pace flush), then the shared I2C1 bus
+ *   (GPIO6/7, 400 kHz): PCF85063 RTC bound as the runner
+ *   clock (board/clock_rtc.c), CST9217 touch (INT GPIO22 /
+ *   RST GPIO23), QMI8658 IMU + a 1 s still-desk gyro bias
+ *   calibration attempt. Each sensor failure prints a loud
+ *   TOY-PROD-*-ERR line and the toy continues without that
+ *   sense organ. The shell opens in GALLERY over toy_carts.
+ *   loop, every frame: poll touch (INT-gated, sensor-test
+ *   discipline) and IMU into toy_event_t via the pure seams
+ *   in board/product_input.h; feed EVERY event to
+ *   toy_shell_event first and act on its mask (this file's
+ *   prod_dispatch mirrors emu/main_emu.c shell_do_actions);
+ *   RUNNING steps the cart with the toy5-pace time-boxed
+ *   stepper (feed -> apply live queue -> step, synthetic
+ *   on-device signal source as before - live IMU feed is a
+ *   later parcel) and renders the cart; every other screen
+ *   renders the shell with toy_clock_now() and never steps.
+ *   The presenter flushes every frame in all screens, then
+ *   toy_shell_tick() runs the idle clockface.
+ *
+ * Deliberate deviation from the emu tour's frame stepper:
+ * proof-script entries past step 0 are NOT replayed on
+ * device (the attract firmware's live posture, retained).
+ * Step 0 still applies proof parameter setup then the
+ * shell's param_queue, exactly as the tour's start path;
+ * from step 1 on, the live queue is the only input source,
+ * so on-glass behaviour is the owner's, not a recording's.
+ *
+ * Gestures (board/PRODUCT.md): tap/drag = pointer; device
+ * tilt = TILT; turning the whole device = DIAL; long-press
+ * (>=800 ms, one finger) = KEY_ESC exit/back; two-finger tap
+ * while RUNNING = KEY_X settings. Serial (USB CDC) is
+ * output-only TOY-PROD-* markers, integer prints. No AXP
+ * writes, GPIO25 untouched, no core/cart changes.
  */
 #include <stdio.h>
 #include <string.h>
 
 #include "hardware/clocks.h"
+#include "hardware/gpio.h"
+#include "hardware/i2c.h"
 #include "pico/stdlib.h"
 #include "pico/stdio_usb.h"
 #include "pico/unique_id.h"
 
+#include "clock_civil.h"
+#include "clock_rtc.h"
 #include "display_co5300.h"
 #include "display_qspi_pio.h"
+#include "imu_qmi8658.h"
 #include "presenter.h"
+#include "product_input.h"
+#include "rtc_pcf85063.h"
+#include "touch_cst9217.h"
 #include "toy_cart.h"
+#define TOY_CLOCK_ALLOW 1
+#include "toy_clock.h"
+#define TOY_SHELL_ALLOW 1
+#include "toy_shell.h"
 
 #ifndef TOY_GIT_HEAD
 #define TOY_GIT_HEAD "unknown"
 #endif
 
-/* Wall-clock seconds per cart in the attract rotation. */
-#define TOY_PROD_CART_SECONDS 20u
-
-/* Per-frame sim time budget (toy5-pace, frame-rate first): a
- * frame always runs at least one step, then stops stepping
- * once this many microseconds of sim work have elapsed, even
- * if demo_steps_per_frame has not been reached. A single step
- * longer than the budget still completes and the frame
- * presents after it (steps=frames in PACE marks that regime).
- * Cheap carts finish all their demo steps well inside the
- * budget and pace exactly as before. */
+/* Per-frame sim time budget (toy5-pace, frame-rate first):
+ * unchanged. A frame always runs at least one step, then
+ * stops stepping once this many microseconds of sim work
+ * elapsed, even if demo_steps_per_frame was not reached. */
 #ifndef TOY_PROD_SIM_BUDGET_US
 #define TOY_PROD_SIM_BUDGET_US 30000u
 #endif
 
-/* Product brightness: constant raw DBV (51h), same modest level
- * toy_display_test used for its patterns. Panel stays on. */
+/* Product brightness: constant raw DBV (51h), the modest
+ * level toy_display_test and the attract build used. */
 #define TOY_PROD_DBV 0x50u
 
-/* Boot glass self-test (toy5-presenter black-glass diagnosis):
- * compile with -DTOY_PROD_SELFTEST=ON (CMake option, default
- * OFF; see CMakeLists.txt). Three ~1.5 s solid-colour stages
- * run after panel init, before attract, each bracketing one
- * candidate fault domain; see prod_selftest() below. */
+/* Boot glass self-test (diagnostic, CMake option default
+ * OFF; retained from the presenter parcel verbatim). */
 #ifndef TOY_PROD_SELFTEST
 #define TOY_PROD_SELFTEST 0
 #endif
 
-/* Linker-script symbols for the boot memory evidence line
- * (pico_standard_link script_includes define all of these). */
+/* Shared I2C1 + touch side pins (board/SENSORS.md). */
+#define PIN_I2C_SDA 6u
+#define PIN_I2C_SCL 7u
+#define PIN_TOUCH_INT 22u
+#define PIN_TOUCH_RST 23u
+
+/* Touch read cadence cap (~50 Hz, as main_sensor_test) and
+ * the ungated-probe period for a silent INT line. */
+#define TOY_PROD_TOUCH_READ_MS 20u
+#define TOY_PROD_TOUCH_PROBE_MS 1000u
+/* IMU error back-off: a dead part costs one frame stall per
+ * retry, not one per frame. */
+#define TOY_PROD_IMU_RETRY_MS 500u
+/* Dial integration step cap: a long frame (heavy cart,
+ * settings pause) must not integrate one stale sample over
+ * its whole length. */
+#define TOY_PROD_DIAL_MAX_DT_MS 250u
+/* Boot calibration offer: 50 samples, 20 ms apart (~1 s). */
+#define TOY_PROD_CAL_SAMPLES 50u
+#define TOY_PROD_CAL_PERIOD_MS 20u
+
 extern char __data_start__, __data_end__;
 extern char __bss_start__, __bss_end__;
-extern char __end__, __HeapLimit;         /* heap start / RAM end */
-extern char __StackTop, __StackBottom;    /* SCRATCH_Y stack */
+extern char __end__, __HeapLimit;
+extern char __StackTop, __StackBottom;
 
 static _Alignas(8) unsigned char state_buf[TOY_MAX_STATE_SIZE];
 static toy_presenter_t presenter;
 static co5300_t panel;
+static toy_shell_t shell;
 
-/* Live input seam: empty until a driver parcel enqueues (same
- * posture and comment as main_board.c's board_live_queue). */
+/* Running cart (shell's RUNNING screen), or NULL. */
+static const toy_cart_t *run_cart;
 static toy_queue_t prod_live_queue;
-
-/* Signal seam: synthetic on-device source + frame, as in
- * main_board.c. Source creation (toy_sig_proof_source_init) is
- * the one point a future live source swaps in. */
 static toy_sig_source_t prod_sig_src;
+static int prod_sig_created;
 static int16_t prod_sig_frame[TOY_SIG_MAX_FRAME_VALUES];
 
-/* Run one cart for its attract slot. Returns when the slot's
- * wall clock expires or the signal feed fails (loud, with a
- * marker; the rotation moves on rather than wedge the toy). */
-static void run_cart_attract(const toy_cart_t *cart)
+/* PACE window (RUNNING only), reset at each cart start. */
+static uint64_t pace_mark_us, pace_sim_us, pace_render_us, pace_flush_us;
+static unsigned long pace_frames, pace_steps, pace_seconds;
+
+/* Sensors: ok flags degrade per-device, never wedge. */
+static cst9217_config_t touch_cfg;
+static bool touch_ok, imu_ok;
+static toy_prod_gesture_t gesture;
+static toy_prod_tilt_gate_t tilt_gate;
+static toy_prod_dial_t dial;
+static bool touch_pending;
+static uint64_t next_touch_read_ms, next_touch_probe_ms, next_imu_ms;
+static uint64_t last_imu_ms;
+static bool have_imu_ms;
+static unsigned touch_err_count, imu_err_count;
+static uint8_t prev_screen = 0xFFu;
+
+static toy_i2c_t *bus(void) { return (toy_i2c_t *)i2c1; }
+
+static const char *screen_name(uint8_t s)
 {
+    switch (s) {
+    case TOY_SHELL_GALLERY: return "gallery";
+    case TOY_SHELL_RUNNING: return "running";
+    case TOY_SHELL_SETTINGS: return "settings";
+    case TOY_SHELL_CLOCKSET: return "clockset";
+    case TOY_SHELL_CLOCKFACE: return "clockface";
+    default: return "?";
+    }
+}
+
+static void note_screen(void)
+{
+    uint8_t s = toy_shell_screen(&shell);
+    if (s != prev_screen) {
+        printf("TOY-PROD-EVENT screen=%s cart=%s\n", screen_name(s),
+               toy_shell_current(&shell) ? toy_shell_current(&shell)->name
+                                          : "-");
+        prev_screen = s;
+    }
+}
+
+/* --- cart lifecycle (mirrors emu shell_do_actions) -------------- */
+
+static void prod_stop_cart(const char *why)
+{
+    if (run_cart)
+        printf("TOY-PROD-EVENT exit cart=%s why=%s\n", run_cart->name, why);
+    run_cart = NULL;
+    prod_sig_created = 0;
+    toy_queue_clear(&prod_live_queue);
+}
+
+static void prod_start_cart(void)
+{
+    const toy_cart_t *cart = toy_shell_current(&shell);
+    if (!cart) {
+        printf("TOY-PROD-EVENT start-failed no-current-cart\n");
+        toy_shell_enter(&shell, TOY_SHELL_GALLERY);
+        return;
+    }
+    if (cart->state_size > sizeof state_buf || !cart->render ||
+        cart->demo_steps_per_frame == 0 || toy_cart_check_input(cart) ||
+        toy_cart_check_signal(cart)) {
+        printf("TOY-PROD-BAD-CART cart=%s (staying in gallery)\n",
+               cart->name);
+        toy_shell_enter(&shell, TOY_SHELL_GALLERY);
+        return;
+    }
     int sig_created = toy_sig_proof_source_init(cart, &prod_sig_src);
     if (sig_created < 0) {
         printf("TOY-PROD-SIG-ERR cart=%s stage=init\n", cart->name);
+        toy_shell_enter(&shell, TOY_SHELL_GALLERY);
         return;
     }
+    prod_sig_created = sig_created;
     memset(state_buf, 0, cart->state_size);
-    cart->reset(state_buf);
+    run_cart = cart;
     toy_queue_clear(&prod_live_queue);
-    /* Step-0 parameter setup only (see file header). The cursor
-     * is then dropped: later proof entries never apply. */
+    cart->reset(state_buf);
+    /* Step-0 slot, tour order: proof parameter setup first,
+     * then the shell's user params drain over it. The proof
+     * cursor stops at step 0 for good (file header). */
     uint32_t cur = 0;
     toy_apply_proof_at(cart, state_buf, 0, &cur);
-
-    toy_fb_t *fb = toy_presenter_fb(&presenter);
-    toy_fb_clear(fb, 0x0000u);
-    (void)toy_presenter_blank(&presenter); /* black between carts */
-
+    uint32_t applied = toy_apply_queue(cart, state_buf,
+                                       &shell.param_queue,
+                                       TOY_MAX_EVENTS_PER_STEP);
+    toy_fb_clear(toy_presenter_fb(&presenter), 0x0000u);
+    pace_mark_us = time_us_64() + 1000000ull;
+    pace_sim_us = pace_render_us = pace_flush_us = 0;
+    pace_frames = pace_steps = pace_seconds = 0;
+    printf("TOY-PROD-EVENT start cart=%s params=%lu hash=%016llx\n",
+           cart->name, (unsigned long)applied,
+           (unsigned long long)toy_hash_state(state_buf,
+                                              cart->state_size));
     printf("TOY-PROD-CART cart=%s title=%s steps_per_frame=%lu "
-           "seconds=%lu sim_budget_us=%lu\n",
+           "sim_budget_us=%lu\n",
            cart->name, cart->title,
            (unsigned long)cart->demo_steps_per_frame,
-           (unsigned long)TOY_PROD_CART_SECONDS,
            (unsigned long)TOY_PROD_SIM_BUDGET_US);
+}
 
-    uint64_t slot_start = time_us_64();
-    uint64_t slot_end = slot_start +
-                        (uint64_t)TOY_PROD_CART_SECONDS * 1000000ull;
-    uint64_t pace_mark = slot_start + 1000000ull;
-    uint64_t sim_us = 0, render_us = 0, flush_us = 0;
-    unsigned long frames = 0, seconds = 0, steps_window = 0;
+/* CLOCK_COMMIT: shell gives hh/mm/tz; the date is ours (the
+ * RTC's own calendar date - from now() when valid, else the
+ * raw fields when only the OS flag withholds trust, else a
+ * loudly-named 2000-01-01 fallback so the commit still sets
+ * a real, owner-visible time instead of silently doing
+ * nothing on a never-set chip). */
+static void prod_clock_commit(void)
+{
+    toy_time_t now = toy_clock_now();
+    int64_t base_local = 0;
+    const char *src = "fallback-2000-01-01";
+    if (now.valid) {
+        base_local = toy_clock_local_seconds(now);
+        src = "rtc";
+    } else if (toy_clock_rtc_local_epoch_raw(&base_local)) {
+        src = "rtc-fields-os-set";
+    } else {
+        base_local = toy_days_from_civil(2000, 1, 1) * 86400;
+    }
+    int64_t utc = toy_clock_commit_utc(base_local, shell.clock_hh,
+                                       shell.clock_mm,
+                                       shell.clock_tz_offset_min);
+    bool ok = toy_clock_set(utc, shell.clock_tz_offset_min);
+    printf("TOY-PROD-EVENT clock-commit local=%02ld:%02ld tz=%ld "
+           "utc=%lld date_src=%s ok=%d\n",
+           (long)shell.clock_hh, (long)shell.clock_mm,
+           (long)shell.clock_tz_offset_min, (long long)utc, src,
+           ok ? 1 : 0);
+}
 
-    while (time_us_64() < slot_end) {
-        uint64_t t0 = time_us_64();
-        /* Time-boxed stepper (toy5-pace): at least one step,
-         * then step until demo_steps_per_frame ran or the sim
-         * budget deadline passed. The time check runs once
-         * per step, after the step, and only when further
-         * steps remain - the step sequence itself (feed ->
-         * apply -> step) is unchanged per step. */
-        uint64_t sim_deadline = t0 + TOY_PROD_SIM_BUDGET_US;
-        uint32_t steps_done = 0;
-        for (uint32_t s = 0; s < cart->demo_steps_per_frame; s++) {
-            int frc = toy_feed_step(cart, state_buf,
-                                    sig_created ? &prod_sig_src : 0,
-                                    prod_sig_frame,
-                                    TOY_SIG_MAX_FRAME_VALUES);
-            if (frc) {
-                printf("TOY-PROD-SIG-ERR cart=%s stage=feed code=%d\n",
-                       cart->name, frc);
-                return;
+/* The one event funnel: shell first, act on the mask, in the
+ * emu tour's action order. PARAM_QUEUED outside a start
+ * moves into the live queue (FIFO with later live events,
+ * shared per-step cap at the next boundary - the tour's
+ * choice, and what pauses-in-settings requires). */
+static void prod_dispatch(const toy_event_t *ev)
+{
+    uint32_t act = toy_shell_event(&shell, ev);
+    if (act & TOY_SH_ACT_START_CART)
+        prod_start_cart();
+    if ((act & TOY_SH_ACT_PARAM_QUEUED) &&
+        !(act & TOY_SH_ACT_START_CART)) {
+        unsigned n = 0;
+        while (shell.param_queue.len) {
+            toy_queue_push(&prod_live_queue, &shell.param_queue.ev[0]);
+            for (uint32_t i = 1; i < shell.param_queue.len; i++)
+                shell.param_queue.ev[i - 1] = shell.param_queue.ev[i];
+            shell.param_queue.len--;
+            n++;
+        }
+        printf("TOY-PROD-EVENT params-queued n=%u\n", n);
+    }
+    if (act & TOY_SH_ACT_EXIT_TO_GALLERY)
+        prod_stop_cart("shell-exit");
+    if (act & TOY_SH_ACT_CLOCK_COMMIT)
+        prod_clock_commit();
+    if (act & TOY_SH_ACT_FORWARD_TO_CART)
+        toy_queue_push(&prod_live_queue, ev);
+    note_screen();
+}
+
+/* --- input producers -------------------------------------------- */
+
+/* INT-gated touch poll, main_sensor_test.c discipline: level
+ * sampled every frame (GPIO only), reads gated by
+ * cst9217_should_read(pending, any-active, 1 Hz probe) and
+ * capped at ~50 Hz. NO_REPORT (all-FF window) is benign and
+ * never a release; a non-empty frame with no accepted
+ * contact is the release frame. Decoded points become
+ * events only through the gesture seam. */
+static void prod_touch_poll(uint64_t now_ms)
+{
+    if (!touch_ok)
+        return;
+    bool lvl_high = cst9217_int_level(&touch_cfg);
+    if (cst9217_int_is_asserted(lvl_high))
+        touch_pending = true;
+    if (now_ms < next_touch_read_ms ||
+        !cst9217_should_read(touch_pending,
+                             toy_prod_gesture_any_active(&gesture),
+                             now_ms >= next_touch_probe_ms))
+        return;
+    next_touch_read_ms = now_ms + TOY_PROD_TOUCH_READ_MS;
+    next_touch_probe_ms = now_ms + TOY_PROD_TOUCH_PROBE_MS;
+    touch_pending = false;
+    cst9217_report_t rep;
+    int rc = cst9217_read_report(&touch_cfg, &rep, NULL);
+    if (rc == CST9217_NO_REPORT)
+        return;
+    if (rc != CST9217_OK) {
+        touch_err_count++;
+        if (touch_err_count == 1u || (touch_err_count % 100u) == 0u)
+            printf("TOY-PROD-TOUCH-ERR rc=%d count=%u\n", rc,
+                   touch_err_count);
+        return;
+    }
+    if (rep.empty)
+        return;
+    bool present[TOY_PROD_MAX_CONTACTS] = { false, false };
+    int32_t px[TOY_PROD_MAX_CONTACTS] = { 0, 0 };
+    int32_t py[TOY_PROD_MAX_CONTACTS] = { 0, 0 };
+    if (rep.valid) {
+        for (unsigned i = 0; i < rep.num_points; i++) {
+            unsigned id = rep.points[i].track_id;
+            if (id < TOY_PROD_MAX_CONTACTS) {
+                present[id] = true;
+                px[id] = rep.points[i].x;
+                py[id] = rep.points[i].y;
             }
-            /* Empty on current hardware; shared step cap, as in
-             * main_board.c (proof cursor is absent live). */
-            toy_apply_queue(cart, state_buf, &prod_live_queue,
-                            TOY_MAX_EVENTS_PER_STEP);
-            cart->step(state_buf);
-            steps_done++;
-            if (steps_done < cart->demo_steps_per_frame &&
-                time_us_64() >= sim_deadline)
-                break;
         }
-        steps_window += steps_done;
-        uint64_t t1 = time_us_64();
-        cart->render(state_buf, fb);
-        uint64_t t2 = time_us_64();
-        int rc = toy_presenter_flush(&presenter);
-        uint64_t t3 = time_us_64();
-        if (rc != CO5300_OK) {
-            printf("TOY-PROD-FLUSH-ERR cart=%s rc=%d\n", cart->name, rc);
-            return;
-        }
-        sim_us += t1 - t0;
-        render_us += t2 - t1;
-        flush_us += t3 - t2;
-        frames++;
+    }
+    toy_event_t out[6];
+    size_t n = toy_prod_gesture_report(
+        &gesture, now_ms, toy_shell_screen(&shell) == TOY_SHELL_RUNNING,
+        present, px, py, out, 6u);
+    for (size_t i = 0; i < n; i++)
+        prod_dispatch(&out[i]);
+}
 
-        if (t3 >= pace_mark) {
-            seconds++;
-            /* steps= is the window's total sim steps: against
-             * frames * demo_steps_per_frame it gives the
-             * frame-rate-first sim-speed ratio (1.0 = budget
-             * never bit; steps == frames = one step per frame,
-             * the single-step-over-budget regime). */
-            printf("TOY-PROD-PACE cart=%s sim_us=%llu render_us=%llu "
-                   "flush_us=%llu frames=%lu steps=%lu seconds=%lu\n",
-                   cart->name, (unsigned long long)sim_us,
-                   (unsigned long long)render_us,
-                   (unsigned long long)flush_us, frames, steps_window,
-                   seconds);
-            sim_us = render_us = flush_us = 0;
-            frames = 0;
-            steps_window = 0;
-            pace_mark = t3 + 1000000ull;
+static void prod_gesture_poll(uint64_t now_ms)
+{
+    if (!touch_ok)
+        return;
+    toy_event_t out[1];
+    size_t n = toy_prod_gesture_poll(&gesture, now_ms, out, 1u);
+    for (size_t i = 0; i < n; i++)
+        prod_dispatch(&out[i]);
+}
+
+/* One IMU sample per frame: tilt through the 33 ms / 20 mg
+ * gate, dial through the bias-corrected accumulator with
+ * real dt (capped). Read errors back off and count. */
+static void prod_imu_poll(uint64_t now_ms)
+{
+    if (!imu_ok || now_ms < next_imu_ms)
+        return;
+    qmi8658_milli_t m;
+    if (qmi8658_read_milli(bus(), &m, NULL) != 0) {
+        imu_err_count++;
+        if (imu_err_count == 1u || (imu_err_count % 100u) == 0u)
+            printf("TOY-PROD-IMU-ERR count=%u\n", imu_err_count);
+        next_imu_ms = now_ms + TOY_PROD_IMU_RETRY_MS;
+        have_imu_ms = false;
+        return;
+    }
+    uint32_t dt_ms = 0;
+    if (have_imu_ms && now_ms > last_imu_ms) {
+        uint64_t d = now_ms - last_imu_ms;
+        dt_ms = d > TOY_PROD_DIAL_MAX_DT_MS ? TOY_PROD_DIAL_MAX_DT_MS
+                                            : (uint32_t)d;
+    }
+    last_imu_ms = now_ms;
+    have_imu_ms = true;
+    toy_event_t ev;
+    if (toy_prod_tilt_gate_poll(&tilt_gate, now_ms, m.ax_mg, m.ay_mg, &ev))
+        prod_dispatch(&ev);
+    if (toy_prod_dial_feed(&dial, m.gz_mdps, dt_ms, &ev))
+        prod_dispatch(&ev);
+}
+
+/* --- RUNNING frame ---------------------------------------------- */
+
+/* Time-boxed stepper (toy5-pace, unchanged arithmetic): at
+ * least one step, then until demo_steps_per_frame ran or the
+ * budget deadline passed; feed -> apply -> step per step,
+ * live queue under the shared cap. Returns steps run, or -1
+ * on a signal-feed failure (caller bails to the gallery). */
+static int prod_step_frame(void)
+{
+    const toy_cart_t *cart = run_cart;
+    uint64_t deadline = time_us_64() + TOY_PROD_SIM_BUDGET_US;
+    uint32_t steps_done = 0;
+    for (uint32_t s = 0; s < cart->demo_steps_per_frame; s++) {
+        int frc = toy_feed_step(cart, state_buf,
+                                prod_sig_created ? &prod_sig_src : 0,
+                                prod_sig_frame,
+                                TOY_SIG_MAX_FRAME_VALUES);
+        if (frc) {
+            printf("TOY-PROD-SIG-ERR cart=%s stage=feed code=%d\n",
+                   cart->name, frc);
+            return -1;
         }
+        toy_apply_queue(cart, state_buf, &prod_live_queue,
+                        TOY_MAX_EVENTS_PER_STEP);
+        cart->step(state_buf);
+        steps_done++;
+        if (steps_done < cart->demo_steps_per_frame &&
+            time_us_64() >= deadline)
+            break;
+    }
+    return (int)steps_done;
+}
+
+static void prod_pace_account(uint64_t sim_us, uint64_t render_us,
+                              uint64_t flush_us, unsigned steps)
+{
+    pace_sim_us += sim_us;
+    pace_render_us += render_us;
+    pace_flush_us += flush_us;
+    pace_frames++;
+    pace_steps += steps;
+    uint64_t now = time_us_64();
+    if (run_cart && now >= pace_mark_us) {
+        pace_seconds++;
+        printf("TOY-PROD-PACE cart=%s sim_us=%llu render_us=%llu "
+               "flush_us=%llu frames=%lu steps=%lu seconds=%lu\n",
+               run_cart->name, (unsigned long long)pace_sim_us,
+               (unsigned long long)pace_render_us,
+               (unsigned long long)pace_flush_us, pace_frames, pace_steps,
+               pace_seconds);
+        pace_sim_us = pace_render_us = pace_flush_us = 0;
+        pace_frames = 0;
+        pace_steps = 0;
+        pace_mark_us = now + 1000000ull;
     }
 }
 
 #if TOY_PROD_SELFTEST
-/* The pre-fix per-row flush, kept only for this self-test: one
- * 466x1 co5300_write_pixels window per glass row (466 CASET+
- * RASET+RAMWR streams per frame). Deliberately not in
- * presenter.c; production flush streams rows inside one CS. */
+/* Retained verbatim from the presenter parcel; see history
+ * for what each stage discriminates. */
 static int selftest_legacy_perrow_flush(void)
 {
     toy_fb_t *fb = toy_presenter_fb(&presenter);
     for (int dy = 0; dy < CO5300_HEIGHT; dy++) {
-        /* Precomputed maps (toy5-pace); pixel-identical to the
-         * formula path this used before, host-pinned - the
-         * per-row WINDOW framing stays the variable under test. */
         int sy = presenter.row_src[dy];
         toy_presenter_expand_row(&fb->px[(size_t)sy * (size_t)fb->w],
                                  presenter.col_src, presenter.row,
@@ -230,31 +466,6 @@ static int selftest_legacy_perrow_flush(void)
     return CO5300_OK;
 }
 
-/* Three stages, ~1.5 s each, TOY-PROD-SELFTEST markers with rc.
- * What each stage discriminates (stated before any flash):
- *   fill-red: co5300_fill RED over the full glass. The exact
- *     path toy_display_test proved on this panel. RED visible
- *     => panel init + transport + fill are healthy inside the
- *     product binary. Black => the fault is in product-context
- *     bring-up, not the presenter; stop and diff against
- *     toy_display_test instead.
- *   presenter-green: fb cleared GREEN with toy_fb_clear, then
- *     the production toy_presenter_flush (single streamed
- *     window). No cart code involved. GREEN visible => fb
- *     wiring, row expansion and the streamed flush are proven
- *     in this binary; if attract then stays black, the fault
- *     moves to carts/runner. Black while red showed => the
- *     presenter/flush path is still broken on device despite
- *     host tests passing.
- *   legacy-perrow-blue: fb cleared BLUE, flushed with the
- *     pre-fix per-row algorithm above (but with the fixed PIO
- *     CS drain). BLUE visible => the CS-drain fix alone
- *     rehabilitates per-row windows, convicting the stale
- *     TXSTALL truncation as the root cause. Black/garbled
- *     while green showed => per-row CASET/RASET+RAMWR streams
- *     are themselves unsafe on this panel at this rate, and
- *     the single-stream presenter is the load-bearing fix.
- * Ends with the fb and glass black, ready for attract. */
 static void prod_selftest(void)
 {
     toy_fb_t *fb = toy_presenter_fb(&presenter);
@@ -286,11 +497,110 @@ static void prod_selftest(void)
 }
 #endif /* TOY_PROD_SELFTEST */
 
+/* --- boot -------------------------------------------------------- */
+
+static const char *tz_source_name(int src)
+{
+    switch (src) {
+    case TOY_CLOCK_TZ_RAM_BYTE: return "rtc-ram";
+    case TOY_CLOCK_TZ_SESSION: return "session-unpersisted";
+    default: return "default";
+    }
+}
+
+static void boot_rtc(void)
+{
+    int rc = toy_clock_rtc_bind(bus());
+    if (rc != 0) {
+        printf("TOY-PROD-RTC-ERR rc=%d (clock unset; shell continues)\n",
+               rc);
+        return;
+    }
+    toy_time_t now = toy_clock_now();
+    if (now.valid) {
+        unsigned m = toy_clock_minutes_of_day(now);
+        printf("TOY-PROD-RTC ok valid=1 utc=%lld tz=%ld tz_src=%s "
+               "local=%02u:%02u\n",
+               (long long)now.utc_seconds, (long)now.tz_offset_min,
+               tz_source_name(toy_clock_rtc_tz_source()), m / 60u, m % 60u);
+    } else {
+        printf("TOY-PROD-RTC ok valid=0 tz=%ld tz_src=%s "
+               "(unset/stopped: set it from SET CLOCK)\n",
+               (long)now.tz_offset_min,
+               tz_source_name(toy_clock_rtc_tz_source()));
+    }
+}
+
+static void boot_touch(void)
+{
+    touch_cfg.i2c = bus();
+    touch_cfg.rst_gpio = PIN_TOUCH_RST;
+    touch_cfg.int_gpio = PIN_TOUCH_INT;
+    int rc = cst9217_reset(&touch_cfg);
+    cst9217_info_t info;
+    memset(&info, 0, sizeof info);
+    if (rc == CST9217_OK)
+        rc = cst9217_read_info(&touch_cfg, &info);
+    int rc2 = (rc == CST9217_OK) ? cst9217_enter_normal(&touch_cfg)
+                                 : rc;
+    if (rc2 != CST9217_OK) {
+        printf("TOY-PROD-TOUCH-ERR rc=%d (no touch; dial/tilt only)\n",
+               rc2);
+        touch_ok = false;
+        return;
+    }
+    touch_ok = true;
+    printf("TOY-PROD-TOUCH ok chip=0x%04x res=%ux%u mirror=%d "
+           "int_gpio=%u rst_gpio=%u\n",
+           info.chip_type, info.resolution_x, info.resolution_y,
+           TOY_PROD_TOUCH_MIRROR, PIN_TOUCH_INT, PIN_TOUCH_RST);
+}
+
+static void boot_imu_and_calibrate(void)
+{
+    uint8_t who = 0, rev = 0;
+    int rc = qmi8658_probe(bus(), &who, &rev);
+    if (rc == 0)
+        rc = qmi8658_init(bus());
+    if (rc != 0) {
+        printf("TOY-PROD-IMU-ERR rc=%d who=0x%02x (no tilt/dial)\n", rc,
+               who);
+        imu_ok = false;
+        toy_prod_dial_init(&dial, 0);
+        return;
+    }
+    imu_ok = true;
+    printf("TOY-PROD-IMU ok who=0x%02x rev=0x%02x odr_hz=%u\n", who, rev,
+           QMI8658_ODR_HZ);
+    /* ~1 s still-desk offer. Whatever the board is doing
+     * (held, moving), the pure gate decides; a rejection is
+     * a printed skip with bias 0, never a guess. */
+    toy_prod_cal_t cal;
+    toy_prod_cal_init(&cal);
+    unsigned got = 0;
+    for (unsigned i = 0; i < TOY_PROD_CAL_SAMPLES; i++) {
+        qmi8658_milli_t m;
+        if (qmi8658_read_milli(bus(), &m, NULL) == 0) {
+            toy_prod_cal_add(&cal, m.ax_mg, m.ay_mg, m.az_mg, m.gz_mdps);
+            got++;
+        }
+        sleep_ms(TOY_PROD_CAL_PERIOD_MS);
+    }
+    int32_t bias = 0;
+    if (toy_prod_cal_finish(&cal, &bias)) {
+        printf("TOY-PROD-CAL ok bias_mdps=%ld samples=%u\n", (long)bias,
+               got);
+    } else {
+        bias = 0;
+        printf("TOY-PROD-CAL skipped samples=%u (not still at 1g; "
+               "dial bias=0)\n", got);
+    }
+    toy_prod_dial_init(&dial, bias);
+}
+
 int main(void)
 {
     stdio_init_all();
-    /* Wait for the host to attach before the banner (max ~15 s),
-     * same posture as main_board.c. No LED on this board. */
     for (int i = 0; i < 150 && !stdio_usb_connected(); i++)
         sleep_ms(100);
     sleep_ms(200);
@@ -300,16 +610,10 @@ int main(void)
     printf("TOY-PROD-BOOT git %s serial %s clk_hz %lu\n", TOY_GIT_HEAD,
            idstr, (unsigned long)clock_get_hz(clk_sys));
     printf("TOY-PROD-PRESENTER mode=%s fb=%dx%d fb_bytes=%lu carts=%d "
-           "cart_seconds=%lu dbv=0x%02x\n",
+           "dbv=0x%02x shell=1\n",
            TOY_PRESENTER_MODE_NAME, TOY_PRESENTER_FB_W, TOY_PRESENTER_FB_H,
            (unsigned long)TOY_PRESENTER_FB_BYTES, toy_cart_count,
-           (unsigned long)TOY_PROD_CART_SECONDS, TOY_PROD_DBV);
-    /* Free-SRAM evidence from the linked layout itself: main RAM
-     * is [0x20000000, __HeapLimit); __end__ is the first byte past
-     * .data/.bss/.heap-reserve, so heap_free is what option (a)
-     * in presenter.h was judged on. The core-0 stack lives in
-     * SCRATCH_Y, reserved by crt0's .stack spacer
-     * (PICO_STACK_SIZE, set for this target in CMakeLists.txt). */
+           TOY_PROD_DBV);
     printf("TOY-PROD-MEM data_bytes=%lu bss_bytes=%lu heap_free_bytes=%lu "
            "stack_reserved_bytes=%lu state_buf_bytes=%lu\n",
            (unsigned long)(&__data_end__ - &__data_start__),
@@ -338,33 +642,70 @@ int main(void)
             sleep_ms(1000);
     }
     toy_presenter_init(&presenter, &panel);
-    /* GRAM is undefined after init; first act is black. */
-    (void)toy_presenter_blank(&presenter);
+    (void)toy_presenter_blank(&presenter); /* GRAM undefined: black first */
 #if TOY_PROD_SELFTEST
     prod_selftest();
 #endif
 
-    printf("TOY-PROD-ATTRACT carts=%d seconds_each=%lu\n", toy_cart_count,
-           (unsigned long)TOY_PROD_CART_SECONDS);
+    printf("TOY-PROD-PHASE sensors i2c1 sda=%u scl=%u hz=400000\n",
+           PIN_I2C_SDA, PIN_I2C_SCL);
+    i2c_init(i2c1, 400u * 1000u);
+    gpio_set_function(PIN_I2C_SDA, GPIO_FUNC_I2C);
+    gpio_set_function(PIN_I2C_SCL, GPIO_FUNC_I2C);
+    gpio_pull_up(PIN_I2C_SDA);
+    gpio_pull_up(PIN_I2C_SCL);
+
+    boot_rtc();
+    boot_touch();
+    boot_imu_and_calibrate();
+
+    toy_prod_gesture_init(&gesture);
+    toy_prod_tilt_gate_init(&tilt_gate);
+    toy_queue_clear(&prod_live_queue);
+    toy_shell_init(&shell, toy_carts, toy_cart_count);
+    prev_screen = 0xFFu;
+    note_screen();
+    printf("TOY-PROD-SHELL carts=%d touch=%d imu=%d (gallery first; "
+           "controls in board/PRODUCT.md)\n",
+           toy_cart_count, touch_ok ? 1 : 0, imu_ok ? 1 : 0);
+
+    toy_fb_t *fb = toy_presenter_fb(&presenter);
     for (;;) {
-        for (int i = 0; i < toy_cart_count; i++) {
-            const toy_cart_t *cart = toy_carts[i];
-            if (cart->state_size > sizeof state_buf) {
-                printf("TOY-PROD-SKIP cart=%s state_size=%lu exceeds %lu\n",
-                       cart->name, (unsigned long)cart->state_size,
-                       (unsigned long)sizeof state_buf);
-                continue;
+        uint64_t now_ms = toy_clock_mono_ms();
+        prod_touch_poll(now_ms);
+        prod_gesture_poll(now_ms);
+        prod_imu_poll(now_ms);
+
+        uint64_t t0 = time_us_64();
+        bool cart_frame = false;
+        unsigned steps = 0;
+        if (toy_shell_screen(&shell) == TOY_SHELL_RUNNING && run_cart) {
+            int ran = prod_step_frame();
+            if (ran < 0) {
+                prod_stop_cart("sig-feed-error");
+                toy_shell_enter(&shell, TOY_SHELL_GALLERY);
+                note_screen();
+            } else {
+                steps = (unsigned)ran;
+                cart_frame = true;
             }
-            if (toy_cart_check_input(cart) || toy_cart_check_signal(cart)) {
-                printf("TOY-PROD-BAD-CART cart=%s\n", cart->name);
-                continue;
-            }
-            if (!cart->render || cart->demo_steps_per_frame == 0) {
-                printf("TOY-PROD-SKIP cart=%s no-render-or-pacing\n",
-                       cart->name);
-                continue;
-            }
-            run_cart_attract(cart);
         }
+        uint64_t t1 = time_us_64();
+        if (cart_frame)
+            run_cart->render(state_buf, fb);
+        else
+            toy_shell_render(&shell, fb, toy_clock_now());
+        uint64_t t2 = time_us_64();
+        rc = toy_presenter_flush(&presenter);
+        uint64_t t3 = time_us_64();
+        if (rc != CO5300_OK)
+            printf("TOY-PROD-FLUSH-ERR rc=%d screen=%s\n", rc,
+                   screen_name(toy_shell_screen(&shell)));
+        if (cart_frame)
+            prod_pace_account(t1 - t0, t2 - t1, t3 - t2, steps);
+
+        (void)toy_shell_tick(&shell);
+        note_screen();
     }
 }
+
