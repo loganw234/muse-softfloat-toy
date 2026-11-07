@@ -85,3 +85,4 @@
 {"parcel": "toy5-pace", "parcel_commit": "421cb1c72a96d3946c5b6d3b5920ee89b1379b12", "copy_head": "c0ee6e306f319e1d6011464f7ae9eaa99d26b187", "plants": 5, "key_sha256": "c4cb86da7a84874a6a43da2d0af72d4fa94849593ded5a5631082b9004533626", "checked_by": "lead-merge", "status": "dispatched"}
 {"parcel": "toy5-pace", "status": "verdict", "caught": 5, "plants": 5, "extra_findings": [], "verifier_report": "scratch/toy2/verify-pace.md", "checked_by": "lead-merge"}
 {"parcel": "toy5-shell", "parcel_commit": "b0803ffd76ac238a1f7db7c60d82db1eda5df7f5", "copy_head": "32f3084af266fe2e7b100ef5e9df48ff70f2b094", "plants": 5, "key_sha256": "73349037ae2efad8097fcf23611cb83d89480ab2a0acfd4c68522cb94c8abbf3", "checked_by": "lead-merge", "status": "dispatched"}
+{"parcel": "toy5-shell", "status": "verdict", "caught": 5, "plants": 5, "extra_findings": [], "verifier_report": "scratch/toy2/verify-shellprod.md", "checked_by": "lead-merge"}
