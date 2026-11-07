@@ -5,17 +5,20 @@
 glass, with live CST9217 touch, QMI8658 tilt/dial, and the
 PCF85063 RTC as the wall clock. It replaces the
 toy5-presenter attract rotation (not retained; see
-`main_product.c` header). Feed carts still run on their
-synthetic on-device sources; wiring the live IMU into the
-signal seam is the next parcel.
+`main_product.c` header). The four IMU feed carts run on
+the real QMI8658 when it is up (toy5-livefeed; see *Live
+IMU feed* below) and fall back loudly to their synthetic
+scenarios when it is not.
 
 | File | Contents |
 |---|---|
 | `main_product.c` | Boot + shell runner loop (event funnel, time-boxed stepper, presenter flush) |
 | `product_input.h` | Pure seams: touch mapping, gesture machine, tilt gate, dial accumulator, still calibration |
+| `live_feed.h` | Pure live-feed seam: sensor->synthetic axis transform, latest-sample hold + counters, source selection, LIVE info |
 | `clock_rtc.{c,h}` | `toy_clock.h` over the PCF85063 (toy_product only; `toy_board` keeps `clock_board.c`) |
 | `clock_civil.h` | Pure civil <-> epoch conversions, clock-commit combiner, tz RAM-byte encoding |
 | `../tools/product_input_test.c` | Host test for both pure headers (163 checks) |
+| `../tools/live_feed_test.c` | Host test for `live_feed.h` + the core LIVE labelling path (45 checks; link line in its header) |
 
 ## Boot sequence
 
@@ -89,6 +92,99 @@ Per screen:
 | SETTINGS | tap a row to select; tap the selected row's left/right third to −/+; tap footer to run/resume | adjust selected value | back (to the cart if it was running, else GALLERY) | `*` = staged for next (re)start; live values apply at the next step when resumed |
 | CLOCK SET | tap the HH / MM / UTC-offset zone to pick the field; tap the SET zone to commit; tap the bottom zone to cancel | adjust the picked field (tz in 15-min steps) | cancel | only hh:mm + offset are edited; the date stays whatever the RTC already holds (see clock below) |
 | CLOCK FACE | any tap wakes to GALLERY (or straight to CLOCK SET if the clock is unset) | wakes to GALLERY | — | shows runner wall time; an unset clock shows as unset, never a fake time |
+
+## Live IMU feed (toy5-livefeed)
+
+The four signal-feed carts — **gpend, seismo, attitude,
+heartbeat** — take the real QMI8658 as their sample source
+in this firmware. The proof firmware (`toy_board`), the
+emulator and the web build keep the pinned synthetic
+streams; only the product runner goes live, through the
+seam core always reserved for it (`toy_feed_step` stays
+proof-strict; the live runner fills frames itself in
+`live_feed.h` and calls `feed()` directly — no core change).
+
+- **Which source, when.** Decided once at cart start: IMU
+  up → **LIVE** (`TOY-PROD-FEED … src=live … stream=…`);
+  IMU down at boot/recovery → the cart's synthetic scenario
+  with `TOY-PROD-FEED … src=synthetic-fallback reason=imu-down`
+  on serial. The on-glass provenance label always tells
+  the truth either way (`LIVE` / `LIVE IMU` / `LIVE CHEST`
+  vs `SYNTHETIC` / `SYNTH CHEST` — the kind sits in the
+  cart's hashed state). An IMU that dies mid-run degrades
+  to holding the last good reading (errors counted, bus
+  recovery runs as usual); an IMU that recovers mid-run
+  does **not** swap a running synthetic cart to live —
+  exit and relaunch.
+- **How samples flow.** One IMU read per presented frame —
+  the same read tilt/dial always took, same error
+  back-off, same bus-health accounting, zero extra I2C.
+  Each sim step needs a fixed number of samples (gpend 1,
+  attitude 1, heartbeat 5, seismo 10) at the cart's 100 Hz
+  assumption, so the step's frame repeats the freshest
+  real reading (**latest-sample hold**). Repeats are
+  counted, never hidden, and motion is never invented: a
+  failed read feeds the last good values and flags the
+  gap into the cart's state; before the first good
+  reading the cart is not stepped and shows `NO SIG`.
+  The sensor itself runs at 125 Hz ODR, but the runner
+  consumes one reading per frame, so the **fresh** rate
+  is the frame rate (single-digit to ~20 Hz depending on
+  the cart's render cost) — the rest is hold repeats.
+- **Telemetry.** While a live cart runs, 1 Hz next to
+  PACE: `TOY-PROD-FEED cart=… src=live fresh=… rep=… err=…
+  max_age_ms=… fresh_hz_x10=… cons_hz_x10=… spec_hz=100
+  warp_x100=…`. `fresh`/`rep` = samples fed that second
+  that were a new reading / a hold repeat; `err` = IMU
+  read failures; `max_age_ms` = oldest held reading
+  actually fed; `fresh_hz_x10` = achieved new-reading
+  rate; `cons_hz_x10` = total samples fed per wall second
+  (steps × samples-per-step); `warp_x100` = cons/spec×100
+  — how fast cart time runs vs wall time. Warp ≠ 100
+  scales anything the cart derives per assumed sample:
+  seismo's displayed Hz and heartbeat's BPM both read
+  true÷warp (e.g. warp 75 → BPM reads ~1.33× high).
+  Expect roughly: gpend/attitude slow (warp well under
+  100 — attitude's heavy render makes it slowest),
+  heartbeat near 100 at ~20 fps, seismo fast (~200).
+  The FEED line on your flash replaces these estimates
+  with measurements.
+- **Axes.** Sensor counts are mapped into the synthetic
+  scenarios' frame (flat screen-up rests at +1 g on az):
+  az is negated (the sensor's +Z points through the back
+  of the board), ax/ay pass through under the same
+  starting alignment as the tilt map. The in-plane signs
+  are **not yet owner-observed for feed carts**: if
+  gpend's bob or attitude's ball falls the wrong way when
+  you tip the board, the fix is `TOY_LIVE_FEED_AX_SIGN` /
+  `TOY_LIVE_FEED_AY_SIGN` in `live_feed.h` (one define
+  each, same ritual as the tilt signs).
+- **No checkpoints of live runs.** A live stream cannot
+  be rebuilt from a step count, and core refuses it; the
+  product firmware never attempts it (it makes no
+  checkpoint/bank calls at all). Proof hashes are
+  synthetic-only everywhere, unchanged.
+
+### Heartbeat chest test (owner)
+
+The cart says it on glass and it stays true live: **toy,
+not medical** — no reading from it means anything about
+your health. To try it: launch **heartbeat** (label must
+read `LIVE CHEST`; `SYNTH CHEST` means the IMU was down —
+relaunch after checking `TOY-PROD-IMU ok`), lie back,
+rest the board screen-up flat on your sternum, hold it
+still with as little hand pressure as you can, breathe
+slowly, give it ~10 s. Honest expectations: breathing
+(~12 mg modelled) should visibly ride the trace; the
+heartbeat features are only ~5 mg against this sensor's
+noise and the ~frame-rate fresh sampling (see above), so
+beats may register intermittently or not at all, and the
+BPM number is warp-scaled (divide by warp_x100/100 from
+the FEED line). A desk test works first: heartbeat live
+on a table, tap the table — the detector should tick.
+Serial `fresh_hz_x10` tells you the real sampling you
+got; anything under ~15 Hz fresh will mostly show
+breathing and motion, not a clean pulse train.
 
 ## The clock
 
@@ -170,6 +266,9 @@ this itself, no owner action:
 | `TOY-PROD-EVENT exit cart=… why=…` | cart stopped (`shell-exit`, `sig-feed-error`) |
 | `TOY-PROD-EVENT clock-commit local=hh:mm tz=… utc=… date_src=… ok=…` | a CLOCK SET commit and its fate |
 | `TOY-PROD-PACE cart=… sim_us=… steps=…` | 1 Hz while RUNNING (unchanged toy5-pace line) |
+| `TOY-PROD-FEED cart=… src=live odr_hz=125 spec_hz=… sps=… stream=…` | at a feed cart's start: it is on the real IMU; `stream` is the LIVE parameter hash stamped into cart state |
+| `TOY-PROD-FEED cart=… src=synthetic-fallback reason=imu-down\|no-live-device …` | at a feed cart's start: no live source, the synthetic scenario runs instead (on-glass label agrees) |
+| `TOY-PROD-FEED cart=… src=live fresh=… rep=… err=… max_age_ms=… fresh_hz_x10=… cons_hz_x10=… spec_hz=… warp_x100=…` | 1 Hz while a LIVE cart runs: new vs hold-repeated samples fed, read errors, oldest held sample fed, achieved fresh rate and consumption rate vs spec, cart-time warp (100 = wall rate) |
 | `TOY-PROD-FLUSH-ERR / -SIG-ERR / -BAD-CART` | presenter/feed/descriptor failures; the toy degrades to the gallery instead of wedging |
 | `TOY-PROD-BUS-RECOVER begin n=… consec=… touch_err=… imu_err=…` | shared-bus reset starting (n = attempts so far incl. this one, consec = consecutive transport errors that triggered it) |
 | `TOY-PROD-BUS-RECOVER done n=… ok=… sda=… scl=… clocks=… touch=… imu=… rtc=… (expected t=… i=… r=…)` | reset outcome: `sda/scl` = line levels found after deinit (0 = held low), `clocks` = SCL pulses until SDA released, per-device live flags after re-probe, `expected` = healthy-at-boot set. `ok=1` = a probe read proved the bus alive |
@@ -249,8 +348,14 @@ backwards; each is a one-define flip, deliberately.
   the RTC's existing date (serial `SET` in
   `toy_sensor_test` remains the date entry path).
 - IMU samples are read once per presented frame, so dial
-  resolution follows frame rate on heavy carts.
-- Feed carts (gpend/seismo/attitude/heartbeat/synspec…)
-  still consume synthetic sources; live IMU feed is next.
+  resolution follows frame rate on heavy carts — and so
+  does the live feed's fresh rate (see *Live IMU feed*:
+  hold repeats fill the gap, warp is printed, never
+  hidden). Draining the IMU faster than frame rate (FIFO
+  or a mid-frame poll) is a possible later parcel, not
+  this one.
+- Live-feed in-plane axis signs are geometry-derived, not
+  yet owner-observed (the gpend/attitude tip check in
+  *Live IMU feed* resolves them; one define each).
 - Proof scripts past step 0 never replay on device
   (deliberate; see `main_product.c`).
