@@ -224,6 +224,13 @@ add_executable(toy_board
 )
 target_include_directories(toy_board PRIVATE ${LIB}/include ${TOY_ROOT}/core)
 target_compile_definitions(toy_board PRIVATE TOY_GIT_HEAD="${TOY_GIT_HEAD}")
+# Status LED GPIO; -1 = no plain LED (Waveshare RP2350-Touch-
+# AMOLED-1.75: GPIO25 is UART1 RX). Default: board header pin.
+set(TOY_BOARD_LED_PIN "" CACHE STRING "Status LED GPIO, -1 for none")
+if(NOT TOY_BOARD_LED_PIN STREQUAL "")
+    target_compile_definitions(toy_board PRIVATE
+        TOY_BOARD_LED_PIN=${TOY_BOARD_LED_PIN})
+endif()
 target_compile_options(toy_board PRIVATE -O2)
 # pico_flash provides flash_safe_execute, hardware_flash the
 # erase/program primitives it wraps (board/ckpt_flash.c).

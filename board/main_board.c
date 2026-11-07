@@ -21,6 +21,21 @@
 #define TOY_GIT_HEAD "unknown"
 #endif
 
+/* Status LED pin: -DTOY_BOARD_LED_PIN=<gpio> from CMake, -1 for
+ * boards with no plain GPIO LED (e.g. Waveshare
+ * RP2350-Touch-AMOLED-1.75, where GPIO25 is UART1 RX). */
+#ifndef TOY_BOARD_LED_PIN
+#define TOY_BOARD_LED_PIN PICO_DEFAULT_LED_PIN
+#endif
+#if TOY_BOARD_LED_PIN >= 0
+#define LED_INIT() do { gpio_init(TOY_BOARD_LED_PIN); \
+    gpio_set_dir(TOY_BOARD_LED_PIN, GPIO_OUT); } while (0)
+#define LED_TOGGLE() gpio_xor_mask(1u << TOY_BOARD_LED_PIN)
+#else
+#define LED_INIT() ((void)0)
+#define LED_TOGGLE() ((void)0)
+#endif
+
 static _Alignas(8) unsigned char state_buf[TOY_MAX_STATE_SIZE];
 
 /* Input seam: the proof loop replays each cart's compiled-in
@@ -96,7 +111,7 @@ static void run_cart(const toy_cart_t *cart, long total, long every)
         if (every > 0 && (s % every) == 0) {
             printf("step %ld hash %016llx\n", s,
                    (unsigned long long)toy_hash_state(state_buf, cart->state_size));
-            gpio_xor_mask(1u << PICO_DEFAULT_LED_PIN);
+            LED_TOGGLE();
         }
     }
     printf("TOY-DONE steps %ld hash %016llx\n", total,
@@ -106,12 +121,11 @@ static void run_cart(const toy_cart_t *cart, long total, long every)
 int main(void)
 {
     stdio_init_all();
-    gpio_init(PICO_DEFAULT_LED_PIN);
-    gpio_set_dir(PICO_DEFAULT_LED_PIN, GPIO_OUT);
+    LED_INIT();
     /* Wait for the host to attach before the banner (max ~15 s),
      * so the capture never races the first lines. */
     for (int i = 0; i < 150 && !stdio_usb_connected(); i++) {
-        gpio_xor_mask(1u << PICO_DEFAULT_LED_PIN);
+        LED_TOGGLE();
         sleep_ms(100);
     }
     sleep_ms(200);
@@ -144,5 +158,5 @@ int main(void)
                  (long)cart->proof_report_every);
     }
     printf("TOY-ALL-DONE\n");
-    for (;;) { gpio_xor_mask(1u << PICO_DEFAULT_LED_PIN); sleep_ms(500); }
+    for (;;) { LED_TOGGLE(); sleep_ms(500); }
 }
