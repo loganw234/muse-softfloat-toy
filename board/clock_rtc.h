@@ -39,4 +39,11 @@ int toy_clock_rtc_tz_source(void);
  * when the chip will not vouch for the time of day. */
 bool toy_clock_rtc_local_epoch_raw(int64_t *local_s_out);
 
+/* Bus-recovery re-probe (busfix): after main_product.c
+ * resets the shared I2C bus, re-run pcf85063_init and one
+ * time read to prove the chip answers. The cached tz is
+ * kept (no RAM-byte reload). Returns the driver's code
+ * (0 ok), -1 if never bound. */
+int toy_clock_rtc_reprobe(void);
+
 #endif

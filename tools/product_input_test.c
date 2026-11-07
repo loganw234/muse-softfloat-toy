@@ -154,17 +154,25 @@ static void test_commit_and_tz(void)
           "commit utc = local - tz (seconds preserved)");
 
     int32_t tz = 0;
-    CHECK(toy_tz_ram_encode(-720) == 1, "tz -720 -> byte 1");
-    CHECK(toy_tz_ram_encode(840) == 105, "tz +840 -> byte 105");
-    CHECK(toy_tz_ram_encode(-420) == 21, "tz -420 (owner) -> byte 21");
-    CHECK(toy_tz_ram_encode(0) == 49, "tz 0 -> byte 49");
-    CHECK(toy_tz_ram_encode(330) == 71, "tz +330 -> byte 71");
+    /* Busfix sentinel encoding: magic bit7 | index 0..104. */
+    CHECK(toy_tz_ram_encode(-720) == 128, "tz -720 -> byte 0x80");
+    CHECK(toy_tz_ram_encode(840) == 232, "tz +840 -> byte 0xE8");
+    CHECK(toy_tz_ram_encode(-420) == 148, "tz -420 (owner) -> 0x80|20");
+    CHECK(toy_tz_ram_encode(0) == 176, "tz 0 -> 0x80|48");
+    CHECK(toy_tz_ram_encode(330) == 198, "tz +330 -> 0x80|70");
     CHECK(toy_tz_ram_encode(331) == -1, "odd-minute tz unpersistable");
     CHECK(toy_tz_ram_encode(900) == -1, "out-of-range tz unpersistable");
     CHECK(toy_tz_ram_encode(-721) == -1, "below-range tz unpersistable");
-    CHECK(!toy_tz_ram_decode(0, &tz), "byte 0 = never stored");
-    CHECK(!toy_tz_ram_decode(106, &tz), "byte 106 foreign, rejected");
-    CHECK(!toy_tz_ram_decode(255, &tz), "byte 255 rejected");
+    CHECK(!toy_tz_ram_decode(0, &tz), "byte 0 (reset) rejected");
+    CHECK(!toy_tz_ram_decode(255, &tz), "byte 255 (erased) rejected");
+    CHECK(!toy_tz_ram_decode(49, &tz),
+          "legacy 49 (live tz=0 impostor) rejected");
+    CHECK(!toy_tz_ram_decode(21, &tz),
+          "legacy 21 (old -420 code) rejected");
+    CHECK(!toy_tz_ram_decode(105, &tz), "legacy max byte rejected");
+    CHECK(!toy_tz_ram_decode(127, &tz), "no-magic byte rejected");
+    CHECK(!toy_tz_ram_decode(233, &tz),
+          "magic but index 105 out of domain, rejected");
     int bad = 0;
     for (int32_t v = TOY_TZ_RAM_MIN; v <= TOY_TZ_RAM_MAX;
          v += TOY_TZ_RAM_STEP) {
@@ -174,6 +182,119 @@ static void test_commit_and_tz(void)
             bad++;
     }
     CHECK(bad == 0, "whole 15-min tz domain round-trips the RAM byte");
+}
+
+/* Busfix: set(utc,tz) -> registers -> now() == utc, pinned
+ * with the exact pure conversions clock_rtc.c runs. The
+ * registers hold UTC, so identity must hold for EVERY tz
+ * (tz never enters the conversion), and the displayed
+ * local image (utc + tz, toy_clock_local_seconds' rule,
+ * computed inline here) must be the wall time the owner
+ * reads. Instants include both live boot UTCs as
+ * regression pins and leap/year edges inside the chip's
+ * 2000..2099 range (the pure helpers are general, but the
+ * contract that matters is what set() can store). */
+static void test_rtc_utc_round_trip(void)
+{
+    static const int32_t tzs[3] = { -420, 0, 330 };
+    static const toy_civil_t instants[] = {
+        { 2000, 2, 29, 23, 59, 59 }, /* 2000 leap edge */
+        { 2000, 3, 1, 0, 0, 0 },
+        { 2028, 2, 29, 12, 34, 56 }, /* in-range leap day */
+        { 2026, 11, 7, 14, 35, 46 }, /* live boot1 utc */
+        { 2026, 11, 7, 9, 11, 53 },  /* live boot2 utc */
+        { 2026, 12, 31, 23, 59, 59 }, /* year edge */
+        { 2027, 1, 1, 0, 0, 0 },
+        { 2099, 12, 31, 23, 59, 59 }, /* chip range top */
+    };
+    CHECK(toy_civil_to_epoch(&(toy_civil_t){ 2026, 11, 7, 14, 35, 46 }) ==
+              1794062146ll,
+          "boot1 pin: 2026-11-07 14:35:46 UTC = 1794062146");
+    CHECK(toy_civil_to_epoch(&(toy_civil_t){ 2026, 11, 7, 9, 11, 53 }) ==
+              1794042713ll,
+          "boot2 pin: 2026-11-07 09:11:53 UTC = 1794042713");
+    int bad = 0;
+    for (unsigned t = 0; t < 3u; t++) {
+        for (unsigned i = 0;
+             i < sizeof instants / sizeof instants[0]; i++) {
+            int64_t utc = toy_civil_to_epoch(&instants[i]);
+            toy_civil_t reg;
+            toy_rtc_civil_from_utc(utc, &reg);
+            /* The register image IS the UTC fields, for any tz. */
+            if (reg.year != instants[i].year ||
+                reg.month != instants[i].month ||
+                reg.day != instants[i].day ||
+                reg.hour != instants[i].hour ||
+                reg.minute != instants[i].minute ||
+                reg.second != instants[i].second)
+                bad++;
+            if (toy_rtc_utc_from_civil(&reg) != utc)
+                bad++;
+            /* Display local = utc + tz (applied once, here). */
+            toy_civil_t local;
+            toy_epoch_to_civil(utc + (int64_t)tzs[t] * 60, &local);
+            if (toy_civil_to_epoch(&local) !=
+                utc + (int64_t)tzs[t] * 60)
+                bad++;
+            (void)local;
+        }
+    }
+    CHECK(bad == 0, "set->registers->now == utc, tz in {-420,0,+330}");
+    /* Boot1 reinterpreted under the fixed convention: the
+     * registers held 14:35:46 UTC all along; at owner tz
+     * the glass shows 07:35 - the live boot line's local
+     * reading, now reached honestly. */
+    toy_civil_t glass;
+    toy_epoch_to_civil(1794062146ll + (int64_t)(-420) * 60, &glass);
+    CHECK(glass.hour == 7 && glass.minute == 35 && glass.second == 46,
+          "boot1 UTC at tz -420 displays 07:35:46 local");
+    /* A tz change alone can never move UTC: same register
+     * image read at tz 0 and tz -420 yields one UTC. */
+    toy_civil_t reg = { 2026, 11, 7, 9, 11, 53 };
+    CHECK(toy_rtc_utc_from_civil(&reg) == 1794042713ll,
+          "register image reads the same UTC at any tz");
+}
+
+/* Busfix: recovery trigger counting / backoff (pure seam). */
+static void test_bus_health(void)
+{
+    toy_prod_bus_health_t h;
+    toy_prod_bus_init(&h);
+    CHECK(!toy_prod_bus_should_recover(&h, 0), "bus: healthy at boot");
+    for (unsigned i = 0; i + 1u < TOY_PROD_BUS_ERR_THRESHOLD; i++)
+        toy_prod_bus_note_error(&h);
+    CHECK(!toy_prod_bus_should_recover(&h, 0),
+          "bus: threshold-1 errors do not trigger");
+    toy_prod_bus_note_error(&h);
+    CHECK(toy_prod_bus_should_recover(&h, 0),
+          "bus: threshold-th consecutive error triggers");
+    toy_prod_bus_note_ok(&h); /* e.g. a NO_REPORT transfer */
+    CHECK(h.consec_err == 0u && !toy_prod_bus_should_recover(&h, 0),
+          "bus: one success clears the run");
+
+    /* Failed recovery keeps the count; cooldown gates retry. */
+    for (unsigned i = 0; i < TOY_PROD_BUS_ERR_THRESHOLD; i++)
+        toy_prod_bus_note_error(&h);
+    toy_prod_bus_note_recovery(&h, 1000, false, true);
+    CHECK(h.recoveries == 1u, "bus: attempt counted");
+    CHECK(h.consec_err == TOY_PROD_BUS_ERR_THRESHOLD,
+          "bus: no probe success, count kept");
+    CHECK(!toy_prod_bus_should_recover(&h, 1000 + 999),
+          "bus: cooldown blocks an instant retry");
+    CHECK(toy_prod_bus_should_recover(&h, 1000 + 1000),
+          "bus: owed again once cooldown lapses");
+
+    /* Probe-proven recovery resets; a still-down device
+     * retries on the slow period, not the cooldown. */
+    toy_prod_bus_note_recovery(&h, 2000, true, true);
+    CHECK(h.consec_err == 0u, "bus: probe success resets count");
+    CHECK(!toy_prod_bus_should_recover(&h, 2000 + 1000),
+          "bus: device-down waits past cooldown alone");
+    CHECK(toy_prod_bus_should_recover(&h, 2000 + 5000),
+          "bus: device-down retry at slow period");
+    toy_prod_bus_note_recovery(&h, 7000, true, false);
+    CHECK(!toy_prod_bus_should_recover(&h, 7000 + 60000),
+          "bus: all devices back, no further recovery");
 }
 
 /* --- touch mapping ---------------------------------------------- */
@@ -652,6 +773,9 @@ int main(void)
     test_tilt_gate();
     test_dial();
     test_calibration();
+    printf("rtc utc registers / bus recovery trigger\n");
+    test_rtc_utc_round_trip();
+    test_bus_health();
     printf("irq merge / gallery tap-launch\n");
     test_touch_pending_merge();
     test_gallery_row_math();

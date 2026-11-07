@@ -15,7 +15,7 @@ signal seam is the next parcel.
 | `product_input.h` | Pure seams: touch mapping, gesture machine, tilt gate, dial accumulator, still calibration |
 | `clock_rtc.{c,h}` | `toy_clock.h` over the PCF85063 (toy_product only; `toy_board` keeps `clock_board.c`) |
 | `clock_civil.h` | Pure civil <-> epoch conversions, clock-commit combiner, tz RAM-byte encoding |
-| `../tools/product_input_test.c` | Host test for both pure headers (142 checks) |
+| `../tools/product_input_test.c` | Host test for both pure headers (163 checks) |
 
 ## Boot sequence
 
@@ -92,10 +92,24 @@ Per screen:
 
 ## The clock
 
-- The RTC registers hold **local** time; the tz offset lives
-  in the PCF85063's free RAM byte (battery-backed), so a
-  power loss keeps both. Any offset the CLOCK SET screen
-  can produce (15-min steps, UTC−12:00..+14:00) persists.
+- The RTC registers hold **UTC**; the tz offset lives in
+  the PCF85063's free RAM byte (battery-backed) and is
+  applied once, at display. A power loss keeps both, and
+  a tz misread can only mislabel the displayed local time
+  — UTC itself never moves. (This convention replaced
+  registers-hold-local after two shell boots reported UTC
+  going backwards; the UTC switch plus the tz sentinel
+  below are the busfix-round fixes, story in
+  `clock_civil.h`.) Any offset the CLOCK SET screen can
+  produce (15-min steps, UTC−12:00..+14:00) persists. The
+  stored byte carries a validity sentinel (magic bit), so
+  a reset/erased RAM byte boots as the UTC−7 default
+  (`tz_src=default`), never as an invented offset; the
+  first boot after the busfix flash also boots
+  `tz_src=default` until the next CLOCK SET commit (old
+  bare-index bytes are rejected by design).
+  `toy_sensor_test`'s serial `SET` writes the registers
+  verbatim, i.e. it takes **UTC**.
 - `toy_clock_now()` is valid only when the chip's
   oscillator-stop flag is clear and the fields form a real
   date. Otherwise the clock is *unset* — a first-class
@@ -109,6 +123,35 @@ Per screen:
   matters; the glass UI edits time-of-day only (shell v1).
 - Monotonic pacing time is the RP2350 boot clock; setting
   the wall clock never injects or swallows sim steps.
+
+## I2C bus recovery (busfix)
+
+Touch, IMU and RTC share I2C1, and a transfer that dies
+mid-byte can leave a slave holding SDA low — then every
+device NACKs forever while the frame loop runs on (the
+observed wedge: tens of minutes of `-TOUCH-ERR` /
+`-IMU-ERR`, gallery still idling). The runner now heals
+this itself, no owner action:
+
+- Transport errors from touch and IMU count *consecutive*
+  failures (`CST9217_NO_REPORT` — an all-FF window — is a
+  successful transfer and clears the count; it is never
+  an error).
+- At 5 consecutive errors (≈a few frames), the main loop
+  runs one bus reset: `i2c_deinit`, up to 9 SCL clocks
+  with SDA released, a forced STOP, re-init at 400 kHz,
+  then re-probes of every device that was healthy at boot
+  (RTC init + read, touch normal-mode handshake —
+  escalating once to a reset pulse — IMU probe + config;
+  the boot gyro bias is kept). A recovery costs one
+  ~150 ms frame and completes well inside 2 s of the
+  wedge. Attempts are at least 1 s apart; a device that
+  stays down is retried every 5 s. The error counter
+  resets only when a probe read actually succeeds.
+- Serial evidence: `TOY-PROD-BUS-RECOVER begin/done`
+  (see the marker table). `sda=0` with `clocks=k` in the
+  done line means a slave was holding the bus and let go
+  after *k* clocks — the aborted-transfer signature.
 
 ## Serial markers (USB CDC, output only)
 
@@ -128,6 +171,8 @@ Per screen:
 | `TOY-PROD-EVENT clock-commit local=hh:mm tz=… utc=… date_src=… ok=…` | a CLOCK SET commit and its fate |
 | `TOY-PROD-PACE cart=… sim_us=… steps=…` | 1 Hz while RUNNING (unchanged toy5-pace line) |
 | `TOY-PROD-FLUSH-ERR / -SIG-ERR / -BAD-CART` | presenter/feed/descriptor failures; the toy degrades to the gallery instead of wedging |
+| `TOY-PROD-BUS-RECOVER begin n=… consec=… touch_err=… imu_err=…` | shared-bus reset starting (n = attempts so far incl. this one, consec = consecutive transport errors that triggered it) |
+| `TOY-PROD-BUS-RECOVER done n=… ok=… sda=… scl=… clocks=… touch=… imu=… rtc=… (expected t=… i=… r=…)` | reset outcome: `sda/scl` = line levels found after deinit (0 = held low), `clocks` = SCL pulses until SDA released, per-device live flags after re-probe, `expected` = healthy-at-boot set. `ok=1` = a probe read proved the bus alive |
 
 ## First shell flash: owner script
 

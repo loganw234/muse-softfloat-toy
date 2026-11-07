@@ -730,4 +730,103 @@ static inline bool toy_prod_tap_launch_take_up(
     return true;
 }
 
+/* --- shared-bus health + recovery trigger (busfix) -------------
+ *
+ * All three product devices share I2C1. A transfer that dies
+ * mid-byte can leave a slave holding SDA low, after which
+ * EVERY address on the bus fails forever (the wedge this
+ * seam arms the runner against; mechanism + SDK evidence in
+ * scratch/toy2/toy5-shell.md, busfix round). This pure
+ * counter decides WHEN main_product.c runs its bus reset;
+ * the reset itself (deinit, 9 SCL clocks, STOP, re-init,
+ * re-probe) is hardware and lives in main_product.c.
+ *
+ * Accounting rules (runner side): call note_error on a
+ * transport failure from touch or IMU (the RTC read result
+ * is not visible through toy_clock_now, which also reports
+ * invalid for a healthy-but-OS-flagged read, so the RTC is
+ * re-probed during recovery but does not vote); call
+ * note_ok on ANY successful transfer, including a touch
+ * CST9217_NO_REPORT - that is a completed transfer, bus
+ * alive, and stays distinctly NOT an error. Recovery is
+ * owed when TOY_PROD_BUS_ERR_THRESHOLD consecutive errors
+ * accrue (at frame cadence that is well under a second),
+ * or, while a boot-healthy device is still down after a
+ * failed recovery, every TOY_PROD_BUS_DEVICE_RETRY_MS.
+ * Attempts are spaced at least TOY_PROD_BUS_RECOVER_COOLDOWN_MS
+ * (a recovery includes ~100 ms of IMU settle; never storm).
+ * The consecutive count resets ONLY on note_ok or on a
+ * recovery whose probe read succeeded (note_recovery with
+ * probe_ok) - a recovery that could not prove the bus alive
+ * keeps the count so the next attempt is owed as soon as
+ * the cooldown lapses.
+ */
+#define TOY_PROD_BUS_ERR_THRESHOLD 5u
+#define TOY_PROD_BUS_RECOVER_COOLDOWN_MS 1000u
+#define TOY_PROD_BUS_DEVICE_RETRY_MS 5000u
+/* INT->read settle for a latch-triggered touch read. No
+ * public CST9217 datasheet INT-to-data-ready number exists
+ * in the consulted sources (touch_cst9217.h header); vendor
+ * flows read from a flag with natural scheduling latency.
+ * Product reads usually land a frame after the edge anyway;
+ * this covers the edge-just-before-frame-top case only. */
+#define TOY_PROD_TOUCH_INT_SETTLE_MS 1u
+
+typedef struct {
+    unsigned consec_err;    /* transport errors since last success */
+    unsigned recoveries;    /* recovery attempts completed */
+    uint64_t last_recovery_ms;
+    bool attempted;         /* a recovery has run at least once */
+    bool device_down;       /* a boot-healthy device is still down */
+} toy_prod_bus_health_t;
+
+static inline void toy_prod_bus_init(toy_prod_bus_health_t *h)
+{
+    h->consec_err = 0;
+    h->recoveries = 0;
+    h->last_recovery_ms = 0;
+    h->attempted = false;
+    h->device_down = false;
+}
+
+static inline void toy_prod_bus_note_error(toy_prod_bus_health_t *h)
+{
+    h->consec_err++;
+}
+
+static inline void toy_prod_bus_note_ok(toy_prod_bus_health_t *h)
+{
+    h->consec_err = 0;
+}
+
+static inline bool toy_prod_bus_should_recover(
+    const toy_prod_bus_health_t *h, uint64_t now_ms)
+{
+    if (h->attempted &&
+        now_ms - h->last_recovery_ms < TOY_PROD_BUS_RECOVER_COOLDOWN_MS)
+        return false;
+    if (h->consec_err >= TOY_PROD_BUS_ERR_THRESHOLD)
+        return true;
+    return h->device_down && h->attempted &&
+           now_ms - h->last_recovery_ms >= TOY_PROD_BUS_DEVICE_RETRY_MS;
+}
+
+/* Record a completed attempt. probe_ok = at least one
+ * successful probe read on the reset bus AND every expected
+ * device the caller requires alive is alive (caller folds
+ * its per-device results into the two flags); device_down
+ * after the attempt drives the slow retry above. */
+static inline void toy_prod_bus_note_recovery(toy_prod_bus_health_t *h,
+                                              uint64_t now_ms,
+                                              bool probe_ok,
+                                              bool device_down)
+{
+    h->recoveries++;
+    h->last_recovery_ms = now_ms;
+    h->attempted = true;
+    h->device_down = device_down;
+    if (probe_ok)
+        h->consec_err = 0;
+}
+
 #endif

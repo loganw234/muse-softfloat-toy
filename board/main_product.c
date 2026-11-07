@@ -55,6 +55,25 @@
  * Serial (USB CDC) is output-only TOY-PROD-* markers,
  * integer prints. No AXP writes, GPIO25 untouched, no
  * core/cart changes.
+ *
+ * Shared-bus recovery (busfix): touch + IMU + RTC all ride
+ * I2C1, and one transfer that dies mid-byte can leave a
+ * slave holding SDA low, after which every address fails
+ * forever while the frame loop runs on (live-observed:
+ * TOUCH-ERR/IMU-ERR counts in the thousands, gallery still
+ * idling to clockface). prod_bus_recover() below is the
+ * self-heal: after TOY_PROD_BUS_ERR_THRESHOLD consecutive
+ * transport errors (pure counter in product_input.h;
+ * CST9217_NO_REPORT is a successful transfer and resets
+ * it), the main loop resets the bus (deinit, up to 9 SCL
+ * clocks with SDA released, STOP, re-init at 400 kHz) and
+ * re-probes every device that was healthy at boot,
+ * printing TOY-PROD-BUS-RECOVER lines (with the SDA/SCL
+ * levels found and clocks needed, so the next wedge
+ * convicts its own mechanism from serial). All I2C happens
+ * in this main loop only: the GPIO22 handler touches the
+ * volatile latch flag + edge counter and nothing else, so
+ * transfers are single-flight by construction.
  */
 #include <stdio.h>
 #include <string.h>
@@ -178,6 +197,14 @@ static uint64_t last_imu_ms;
 static bool have_imu_ms;
 static unsigned touch_err_count, imu_err_count;
 static uint8_t prev_screen = 0xFFu;
+/* Shared-bus health (busfix): consecutive transport errors
+ * across touch + IMU drive prod_bus_recover(). The expect_*
+ * flags record which devices were healthy at boot and are
+ * therefore owed a re-probe; a device absent at boot is
+ * never reprobed (and can never keep the recovery retry
+ * loop alive). */
+static toy_prod_bus_health_t bus_health;
+static bool rtc_ok, expect_rtc, expect_touch, expect_imu;
 
 static toy_i2c_t *bus(void) { return (toy_i2c_t *)i2c1; }
 
@@ -384,17 +411,31 @@ static void prod_touch_poll(uint64_t now_ms)
     next_touch_read_ms = now_ms + TOY_PROD_TOUCH_READ_MS;
     next_touch_probe_ms = now_ms + TOY_PROD_TOUCH_PROBE_MS;
     touch_irq_pending = false;
+    /* INT-triggered reads get the named settle (busfix): an
+     * edge that landed just before this frame-top poll has
+     * had ~0 ms for the chip to finish latching its report.
+     * An edge a full frame old needs nothing; 1 ms either
+     * way is one short sleep before one transfer. */
+    if (pending)
+        sleep_ms(TOY_PROD_TOUCH_INT_SETTLE_MS);
     cst9217_report_t rep;
     int rc = cst9217_read_report(&touch_cfg, &rep, NULL);
-    if (rc == CST9217_NO_REPORT)
+    if (rc == CST9217_NO_REPORT) {
+        /* Successful transfer (window reads all-FF): the
+         * bus is alive, classified apart from NACKs, never
+         * an error - and it clears the wedge counter. */
+        toy_prod_bus_note_ok(&bus_health);
         return;
+    }
     if (rc != CST9217_OK) {
         touch_err_count++;
+        toy_prod_bus_note_error(&bus_health);
         if (touch_err_count == 1u || (touch_err_count % 100u) == 0u)
             printf("TOY-PROD-TOUCH-ERR rc=%d count=%u\n", rc,
                    touch_err_count);
         return;
     }
+    toy_prod_bus_note_ok(&bus_health);
     if (rep.empty)
         return;
     bool present[TOY_PROD_MAX_CONTACTS] = { false, false };
@@ -468,12 +509,14 @@ static void prod_imu_poll(uint64_t now_ms)
     qmi8658_milli_t m;
     if (qmi8658_read_milli(bus(), &m, NULL) != 0) {
         imu_err_count++;
+        toy_prod_bus_note_error(&bus_health);
         if (imu_err_count == 1u || (imu_err_count % 100u) == 0u)
             printf("TOY-PROD-IMU-ERR count=%u\n", imu_err_count);
         next_imu_ms = now_ms + TOY_PROD_IMU_RETRY_MS;
         have_imu_ms = false;
         return;
     }
+    toy_prod_bus_note_ok(&bus_health);
     uint32_t dt_ms = 0;
     if (have_imu_ms && now_ms > last_imu_ms) {
         uint64_t d = now_ms - last_imu_ms;
@@ -487,6 +530,120 @@ static void prod_imu_poll(uint64_t now_ms)
         prod_dispatch(&ev);
     if (toy_prod_dial_feed(&dial, m.gz_mdps, dt_ms, &ev))
         prod_dispatch(&ev);
+}
+
+/* --- shared-bus recovery (busfix) -------------------------------- */
+
+/* One documented I2C bus reset + re-probe of every device
+ * that was healthy at boot. Runs only from the main loop
+ * (all I2C is single-flight there; the GPIO22 IRQ is
+ * disabled across the attempt so no latch can queue a read
+ * onto mid-recovery pins). Sequence (NXP UM10204 bus-reset
+ * shape): i2c_deinit; sample SDA/SCL as pulled-up inputs
+ * (the wedge's fingerprints - SDA low convicts a slave
+ * left mid-byte by an aborted transfer); drive SCL for up
+ * to 9 clocks until SDA releases (a slave interrupted
+ * mid-byte lets go within 9); force a STOP (SDA low while
+ * SCL low, SCL high, SDA released); re-init at 400 kHz;
+ * re-probe RTC (init + read), touch (verified normal-mode
+ * handshake, escalating once to a GPIO23 reset pulse +
+ * handshake), IMU (probe + full config, dial bias kept -
+ * no 1 s still recalibration of a device in a hand).
+ * Gesture/tap state resets so a contact interrupted by
+ * the wedge cannot stick. The consecutive-error counter
+ * resets only if a probe read succeeded (pure seam). */
+static void prod_bus_recover(void)
+{
+    printf("TOY-PROD-BUS-RECOVER begin n=%u consec=%u "
+           "touch_err=%u imu_err=%u\n",
+           bus_health.recoveries + 1u, bus_health.consec_err,
+           touch_err_count, imu_err_count);
+    if (expect_touch)
+        gpio_set_irq_enabled(PIN_TOUCH_INT, GPIO_IRQ_EDGE_FALL,
+                             false);
+    i2c_deinit(i2c1);
+    gpio_init(PIN_I2C_SDA);
+    gpio_init(PIN_I2C_SCL);
+    gpio_set_dir(PIN_I2C_SDA, GPIO_IN);
+    gpio_set_dir(PIN_I2C_SCL, GPIO_IN);
+    gpio_pull_up(PIN_I2C_SDA);
+    gpio_pull_up(PIN_I2C_SCL);
+    sleep_us(10);
+    int sda_was = gpio_get(PIN_I2C_SDA) ? 1 : 0;
+    int scl_was = gpio_get(PIN_I2C_SCL) ? 1 : 0;
+    gpio_set_dir(PIN_I2C_SCL, GPIO_OUT);
+    gpio_put(PIN_I2C_SCL, 1);
+    unsigned clocks = 0;
+    while (!gpio_get(PIN_I2C_SDA) && clocks < 9u) {
+        gpio_put(PIN_I2C_SCL, 0);
+        sleep_us(5);
+        gpio_put(PIN_I2C_SCL, 1);
+        sleep_us(5);
+        clocks++;
+    }
+    /* STOP: SDA low -> (SCL high) -> SDA released high. */
+    gpio_put(PIN_I2C_SCL, 0);
+    gpio_set_dir(PIN_I2C_SDA, GPIO_OUT);
+    gpio_put(PIN_I2C_SDA, 0);
+    sleep_us(5);
+    gpio_put(PIN_I2C_SCL, 1);
+    sleep_us(5);
+    gpio_set_dir(PIN_I2C_SDA, GPIO_IN); /* pull-up: SDA rises */
+    sleep_us(10);
+    /* Same bring-up order as boot. */
+    i2c_init(i2c1, 400u * 1000u);
+    gpio_set_function(PIN_I2C_SDA, GPIO_FUNC_I2C);
+    gpio_set_function(PIN_I2C_SCL, GPIO_FUNC_I2C);
+    gpio_pull_up(PIN_I2C_SDA);
+    gpio_pull_up(PIN_I2C_SCL);
+
+    bool probe_any = false;
+    if (expect_rtc) {
+        rtc_ok = (toy_clock_rtc_reprobe() == 0);
+        probe_any = probe_any || rtc_ok;
+    }
+    if (expect_touch) {
+        int rc = cst9217_enter_normal(&touch_cfg);
+        if (rc != CST9217_OK &&
+            cst9217_reset(&touch_cfg) == CST9217_OK)
+            rc = cst9217_enter_normal(&touch_cfg);
+        touch_ok = (rc == CST9217_OK);
+        probe_any = probe_any || touch_ok;
+    }
+    if (expect_imu) {
+        uint8_t who = 0, rev = 0;
+        int rc = qmi8658_probe(bus(), &who, &rev);
+        if (rc == 0)
+            rc = qmi8658_init(bus());
+        imu_ok = (rc == 0);
+        probe_any = probe_any || imu_ok;
+    }
+    bool device_down = (expect_rtc && !rtc_ok) ||
+                       (expect_touch && !touch_ok) ||
+                       (expect_imu && !imu_ok);
+    toy_prod_bus_note_recovery(&bus_health, toy_clock_mono_ms(),
+                               probe_any, device_down);
+    /* Re-sync input state: a pre-wedge press must not stick,
+     * and the next polls should run promptly, not wait out
+     * stale deadlines. */
+    toy_prod_gesture_init(&gesture);
+    toy_prod_tap_launch_init(&tap_launch);
+    have_imu_ms = false;
+    next_touch_read_ms = 0;
+    next_touch_probe_ms = 0;
+    next_imu_ms = 0;
+    touch_irq_pending = false;
+    if (expect_touch)
+        gpio_set_irq_enabled_with_callback(PIN_TOUCH_INT,
+                                           GPIO_IRQ_EDGE_FALL,
+                                           true, &prod_touch_irq);
+    printf("TOY-PROD-BUS-RECOVER done n=%u ok=%d sda=%d scl=%d "
+           "clocks=%u touch=%d imu=%d rtc=%d "
+           "(expected t=%d i=%d r=%d)\n",
+           bus_health.recoveries, probe_any ? 1 : 0, sda_was,
+           scl_was, clocks, touch_ok ? 1 : 0, imu_ok ? 1 : 0,
+           rtc_ok ? 1 : 0, expect_touch ? 1 : 0,
+           expect_imu ? 1 : 0, expect_rtc ? 1 : 0);
 }
 
 /* --- RUNNING frame ---------------------------------------------- */
@@ -613,8 +770,12 @@ static void boot_rtc(void)
     if (rc != 0) {
         printf("TOY-PROD-RTC-ERR rc=%d (clock unset; shell continues)\n",
                rc);
+        rtc_ok = false;
+        expect_rtc = false;
         return;
     }
+    rtc_ok = true;
+    expect_rtc = true; /* healthy at boot: owed bus re-probes */
     toy_time_t now = toy_clock_now();
     if (now.valid) {
         unsigned m = toy_clock_minutes_of_day(now);
@@ -646,9 +807,11 @@ static void boot_touch(void)
         printf("TOY-PROD-TOUCH-ERR rc=%d (no touch; dial/tilt only)\n",
                rc2);
         touch_ok = false;
+        expect_touch = false;
         return;
     }
     touch_ok = true;
+    expect_touch = true;
     /* Latch INT edges from here on (pin already configured
      * input+pull-up by cst9217_reset). Clearing the latch
      * before enabling drops any boot transient; real edges
@@ -674,10 +837,12 @@ static void boot_imu_and_calibrate(void)
         printf("TOY-PROD-IMU-ERR rc=%d who=0x%02x (no tilt/dial)\n", rc,
                who);
         imu_ok = false;
+        expect_imu = false;
         toy_prod_dial_init(&dial, 0);
         return;
     }
     imu_ok = true;
+    expect_imu = true;
     printf("TOY-PROD-IMU ok who=0x%02x rev=0x%02x odr_hz=%u\n", who, rev,
            QMI8658_ODR_HZ);
     /* ~1 s still-desk offer. Whatever the board is doing
@@ -767,6 +932,7 @@ int main(void)
     boot_touch();
     boot_imu_and_calibrate();
 
+    toy_prod_bus_init(&bus_health);
     toy_prod_gesture_init(&gesture);
     toy_prod_tap_launch_init(&tap_launch);
     toy_prod_tilt_gate_init(&tilt_gate);
@@ -784,6 +950,13 @@ int main(void)
         prod_touch_poll(now_ms);
         prod_gesture_poll(now_ms);
         prod_imu_poll(now_ms);
+        /* Wedge self-heal (busfix): owed after a run of
+         * consecutive transport errors, before this frame's
+         * render asks the (possibly dead) RTC for the time.
+         * Costs one long frame (~150 ms: bus reset + IMU
+         * settle) and only ever runs on a sick bus. */
+        if (toy_prod_bus_should_recover(&bus_health, now_ms))
+            prod_bus_recover();
 
         uint64_t t0 = time_us_64();
         bool cart_frame = false;

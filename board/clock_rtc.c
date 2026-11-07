@@ -6,15 +6,18 @@
  * real when the chip vouches for it, unset otherwise, and
  * unset still never blocks anything (core/toy_clock.h).
  *
- * Register convention: the chip holds LOCAL civil time
- * (utc + tz) - what the owner reads on the glass and what
- * toy_sensor_test's SET typed. now() reads the fields,
- * converts local -> epoch (board/clock_civil.h, integer
- * days-from-civil with solclock's Gregorian leap rule), and
- * subtracts tz for utc_seconds. set() adds tz, converts
- * epoch -> fields, computes the weekday (0=Sunday), and
- * bursts the registers (which clears OS: writing the time
- * is the act that re-establishes trust).
+ * Register convention: the chip holds UTC civil time
+ * (busfix round; full story in board/clock_civil.h). now()
+ * reads the fields and converts straight to epoch via
+ * toy_rtc_utc_from_civil; set() converts epoch -> fields
+ * via toy_rtc_civil_from_utc, computes the weekday
+ * (0=Sunday) of the UTC date, and bursts the registers
+ * (which clears OS: writing the time is the act that
+ * re-establishes trust). tz is NOT applied to the
+ * registers in either direction - it lives in the RAM
+ * byte + cache and is applied once at display by
+ * toy_clock_local_seconds (core/toy_clock.h), so a tz
+ * misread can mislabel local time but can never move UTC.
  *
  * Validity = transfer ok AND fields parsed as a real date
  * (driver ranges + month-length/leap cross-check here) AND
@@ -26,11 +29,12 @@
  * 0x03, battery-backed with the time registers) holds the
  * offset in clock_civil.h's encoding (multiples of 15 min
  * in [-720,840] - the shell clock-set screen's whole domain;
- * 0 = never stored). It is read once at bind and cached;
+ * magic-bit sentinel so reset/erased/legacy bytes are not
+ * a stored tz). It is read once at bind and cached;
  * set() updates cache + byte. An off-domain tz (odd minutes)
  * works for the session but does not persist - the byte is
  * left untouched and the next boot falls back to the stored
- * or default offset. Default when nothing is stored:
+ * or default offset. Default when nothing valid is stored:
  * TOY_TZ_DEFAULT_MIN (-420, owner's UTC-7). So unlike the
  * RAM-only alternative, power loss does NOT reset tz for
  * any tz the product UI can produce.
@@ -80,15 +84,34 @@ int toy_clock_rtc_tz_source(void)
     return rtc_tz_src;
 }
 
+/* Bus-recovery re-probe (main_product.c): the bus was just
+ * reset; prove the chip answers again. Re-runs
+ * pcf85063_init (running, 24 h, CAP_SEL preserved; time/OS
+ * untouched) and one time read as the probe transfer.
+ * Deliberately does NOT reload the tz byte: the cached tz
+ * (possibly a live session offset) stays in force across a
+ * bus reset, exactly as the time registers do. */
+int toy_clock_rtc_reprobe(void)
+{
+    if (!rtc_bus)
+        return -1;
+    int rc = pcf85063_init(rtc_bus);
+    if (rc)
+        return rc;
+    pcf85063_time_t t;
+    return pcf85063_read_time(rtc_bus, &t);
+}
+
 uint64_t toy_clock_mono_ms(void)
 {
     return time_us_64() / 1000ull;
 }
 
-/* Read + fully validate the chip fields as a local civil
- * instant. Judges everything except the OS flag (callers
- * decide what OS means for them); *os_out may be NULL. */
-static bool rtc_read_local(toy_civil_t *out, bool *os_out)
+/* Read + fully validate the chip fields as a UTC civil
+ * instant (registers hold UTC, see header). Judges
+ * everything except the OS flag (callers decide what OS
+ * means for them); *os_out may be NULL. */
+static bool rtc_read_utc(toy_civil_t *out, bool *os_out)
 {
     if (!rtc_bus)
         return false;
@@ -112,22 +135,25 @@ toy_time_t toy_clock_now(void)
     t.utc_seconds = 0;
     t.tz_offset_min = rtc_tz_min;
     t.valid = false;
-    toy_civil_t local;
+    toy_civil_t utc;
     bool os = true;
-    if (!rtc_read_local(&local, &os) || os)
+    if (!rtc_read_utc(&utc, &os) || os)
         return t;
-    t.utc_seconds = toy_civil_to_epoch(&local) -
-                    (int64_t)rtc_tz_min * 60;
+    /* Registers hold UTC: no tz arithmetic here. */
+    t.utc_seconds = toy_rtc_utc_from_civil(&utc);
     t.valid = true;
     return t;
 }
 
 bool toy_clock_rtc_local_epoch_raw(int64_t *local_s_out)
 {
-    toy_civil_t local;
-    if (!local_s_out || !rtc_read_local(&local, NULL))
+    toy_civil_t utc;
+    if (!local_s_out || !rtc_read_utc(&utc, NULL))
         return false;
-    *local_s_out = toy_civil_to_epoch(&local);
+    /* Contract unchanged (LOCAL epoch out, for the commit
+     * path's date source): register UTC + cached tz. */
+    *local_s_out = toy_rtc_utc_from_civil(&utc) +
+                   (int64_t)rtc_tz_min * 60;
     return true;
 }
 
@@ -135,23 +161,25 @@ bool toy_clock_set(int64_t utc_seconds, int32_t tz_offset_min)
 {
     if (!rtc_bus)
         return false;
-    toy_civil_t local;
-    toy_epoch_to_civil(utc_seconds + (int64_t)tz_offset_min * 60,
-                       &local);
+    /* Registers hold UTC: fields are the UTC civil image;
+     * tz_offset_min only updates the cached/persisted
+     * display offset below, never the registers. */
+    toy_civil_t utc;
+    toy_rtc_civil_from_utc(utc_seconds, &utc);
     /* The chip stores BCD years 2000..2099 only; refuse
      * outside rather than wrap a century into the glass. */
-    if (local.year < 2000 || local.year > 2099 ||
-        !toy_civil_valid(&local))
+    if (utc.year < 2000 || utc.year > 2099 ||
+        !toy_civil_valid(&utc))
         return false;
     pcf85063_time_t t;
-    t.year = (uint16_t)local.year;
-    t.month = (uint8_t)local.month;
-    t.day = (uint8_t)local.day;
-    t.weekday = (uint8_t)toy_civil_weekday(local.year, local.month,
-                                           local.day);
-    t.hour = (uint8_t)local.hour;
-    t.minute = (uint8_t)local.minute;
-    t.second = (uint8_t)local.second;
+    t.year = (uint16_t)utc.year;
+    t.month = (uint8_t)utc.month;
+    t.day = (uint8_t)utc.day;
+    t.weekday = (uint8_t)toy_civil_weekday(utc.year, utc.month,
+                                           utc.day);
+    t.hour = (uint8_t)utc.hour;
+    t.minute = (uint8_t)utc.minute;
+    t.second = (uint8_t)utc.second;
     t.os_flag = false;
     t.valid = true;
     if (pcf85063_set_time(rtc_bus, &t) != 0)

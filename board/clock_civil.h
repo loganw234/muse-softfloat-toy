@@ -18,13 +18,25 @@
  * agree on every date either can name; the host test pins the
  * solclock-era anchors (2000-01-01 = day 10957) directly.
  *
- * RTC convention (board/clock_rtc.c): the PCF85063 registers
- * hold LOCAL civil time (utc + tz), the same wall time the
- * owner typed into toy_sensor_test's SET command. now()
- * converts local fields -> local epoch seconds -> utc by
- * subtracting tz; set() does the inverse. The chip years are
- * BCD 00..99 reported as 2000..2099 (rtc_pcf85063.h), which
- * bounds what set() can store; conversions here are general.
+ * RTC convention (board/clock_rtc.c, busfix round): the
+ * PCF85063 registers hold UTC civil time. tz is applied
+ * exactly once, at display (toy_clock_local_seconds =
+ * utc + tz in core/toy_clock.h) and when a CLOCK SET edit
+ * converts the owner's local hh:mm to UTC for set() (the
+ * commit combiner below). This replaced the original
+ * registers-hold-LOCAL convention after two shell boots
+ * 1h36m apart reported UTC moving BACKWARD 5h23m53s: the
+ * registers had been set to host UTC by toy_sensor_test's
+ * SET (which writes fields verbatim), then read as local,
+ * and a tz misread between the boots (see the RAM-byte
+ * note below) re-interpreted the same registers under a
+ * different offset. With UTC in the registers, a wrong tz
+ * can only mislabel the displayed local time - it can
+ * never move UTC. toy_sensor_test's SET therefore takes
+ * UTC, matching what was actually typed on the live board.
+ * The chip years are BCD 00..99 reported as 2000..2099
+ * (rtc_pcf85063.h), which bounds what set() can store;
+ * conversions here are general.
  *
  * Weekday convention: 0 = Sunday .. 6 = Saturday. The
  * PCF85063 weekday register is a free-running 0..6 counter
@@ -172,6 +184,30 @@ static inline int64_t toy_clock_commit_utc(int64_t base_local_s,
     return local_s - (int64_t)tz_offset_min * 60;
 }
 
+/* --- RTC register image (UTC convention, busfix round) --------
+ *
+ * The exact conversions board/clock_rtc.c set()/now() use
+ * between the toy_clock epoch and the PCF85063 register
+ * fields, factored purely so the host test can pin
+ * set(utc,tz) -> registers -> now() == utc without a chip.
+ * Registers hold UTC, so neither direction takes tz at all:
+ * that absence is the fix. (Under the old local convention
+ * each direction applied tz once and consistently, so the
+ * pair round-tripped too - the live failure needed tz to
+ * CHANGE between boots, which is what the RAM-byte defect
+ * below supplied. UTC registers make UTC immune to that.)
+ */
+static inline void toy_rtc_civil_from_utc(int64_t utc_seconds,
+                                          toy_civil_t *reg_out)
+{
+    toy_epoch_to_civil(utc_seconds, reg_out);
+}
+
+static inline int64_t toy_rtc_utc_from_civil(const toy_civil_t *reg)
+{
+    return toy_civil_to_epoch(reg);
+}
+
 /* --- tz offset <-> PCF85063 RAM byte ---------------------------
  *
  * The PCF85063A has one free RAM byte (register 0x03,
@@ -181,16 +217,41 @@ static inline int64_t toy_clock_commit_utc(int64_t base_local_s,
  * the shell's own editing domain: multiples of 15 minutes in
  * [-720, +840] (toy_shell.c clamps clock_tz_offset_min to
  * exactly that range in 15-minute steps) = 105 values.
- * Encoding: 0 = never stored (the reset value), else
- * 1 + (tz + 720)/15 in 1..105. Offsets outside the domain
- * (an odd-minute tz set over some future host path) keep
- * working in RAM for the session but do not persist; the
- * encode returns -1 and clock_rtc leaves the byte alone.
+ * Offsets outside the domain (an odd-minute tz set over
+ * some future host path) keep working in RAM for the
+ * session but do not persist; the encode returns -1 and
+ * clock_rtc leaves the byte alone.
+ *
+ * Validity sentinel (busfix round): the first encoding was
+ * a bare index, 1+(tz+720)/15 in 1..105 with 0 = never
+ * stored. After a power loss the live board booted with
+ * tz=0 tz_src=rtc-ram although no set had ever stored it -
+ * byte 49, indistinguishable from a stored UTC+0. A true
+ * magic+complement needs two bytes and this chip has
+ * exactly one free byte (the only neighbour candidate,
+ * the 0x02 Offset register, detunes the oscillator if
+ * written with user data), so the sentinel is the
+ * strongest one-byte equivalent: valid bytes are exactly
+ * TOY_TZ_RAM_MAGIC | index, index 0..104 in the low 7
+ * bits, i.e. 0x80..0xE8. That set excludes every plausible
+ * unstored content at once: the reset value 0x00, erased
+ * 0xFF, the whole legacy bare-index range 1..105
+ * (including the observed impostor 49), and BCD/ASCII-
+ * looking time-register values. One byte with 105 values
+ * necessarily has 105 valid codes, so this cannot reject
+ * arbitrary corruption - it rejects the values an
+ * unstored byte actually takes, and clock_rtc falls back
+ * to TOY_TZ_DEFAULT_MIN on any other byte. Note the first
+ * boot after this change: a legacy-encoded byte is (by
+ * design) rejected and tz boots as the -420 default until
+ * the next CLOCK SET commit stores the new format.
  */
 #define TOY_TZ_RAM_MIN (-720)
 #define TOY_TZ_RAM_MAX 840
 #define TOY_TZ_RAM_STEP 15
 #define TOY_TZ_DEFAULT_MIN (-420) /* owner's UTC-7, until set */
+#define TOY_TZ_RAM_MAGIC 0x80u    /* bit7: "a tz was stored here" */
+#define TOY_TZ_RAM_COUNT 105u     /* (840-(-720))/15 + 1 */
 
 static inline int toy_tz_ram_encode(int32_t tz_offset_min)
 {
@@ -198,19 +259,23 @@ static inline int toy_tz_ram_encode(int32_t tz_offset_min)
         return -1;
     if (((tz_offset_min - TOY_TZ_RAM_MIN) % TOY_TZ_RAM_STEP) != 0)
         return -1;
-    return 1 + (tz_offset_min - TOY_TZ_RAM_MIN) / TOY_TZ_RAM_STEP;
+    return (int)(TOY_TZ_RAM_MAGIC +
+                 (unsigned)(tz_offset_min - TOY_TZ_RAM_MIN) /
+                     TOY_TZ_RAM_STEP);
 }
 
-/* Stored byte -> tz. Returns false for 0 (never stored) and
- * for any byte past the domain (foreign/corrupt content):
+/* Stored byte -> tz. Returns false unless the byte carries
+ * the magic bit AND an in-domain index (see sentinel note):
  * the caller falls back to TOY_TZ_DEFAULT_MIN, never invents
  * an offset from noise. */
 static inline bool toy_tz_ram_decode(uint8_t byte, int32_t *tz_out)
 {
-    if (byte == 0u || byte > 105u)
+    if ((byte & TOY_TZ_RAM_MAGIC) == 0u)
         return false;
-    *tz_out = TOY_TZ_RAM_MIN +
-              (int32_t)(byte - 1u) * TOY_TZ_RAM_STEP;
+    unsigned idx = (unsigned)(byte & (uint8_t)~TOY_TZ_RAM_MAGIC);
+    if (idx >= TOY_TZ_RAM_COUNT)
+        return false;
+    *tz_out = TOY_TZ_RAM_MIN + (int32_t)idx * TOY_TZ_RAM_STEP;
     return true;
 }
 
