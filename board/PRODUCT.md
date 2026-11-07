@@ -55,8 +55,13 @@ a running cart sees only what the shell forwards.
   bias subtracted, events at ≥25 milliturn = 9°). Clockwise
   (as you look at the glass) is positive: scroll down /
   increase.
-- **Long-press** — one finger held ≥800 ms = **back/exit**
-  (KEY_ESC). The initial tap still lands first (a running
+- **Long-press** — one finger held **STILL** ~1 s (≥1000 ms
+  within 12 px of where it landed) = **back/exit**
+  (KEY_ESC). **Dragging never exits**: once a touch moves
+  more than 12 px from its start point it is a drag for
+  good — holding it there, or dragging back to the start
+  and holding, will not exit; lift and press again to
+  long-press. The initial tap still lands first (a running
   cart sees the touch-down; the exit key itself never
   reaches it, and the rest of that press is swallowed).
 - **Two-finger tap** — second finger down within 300 ms of
@@ -141,8 +146,11 @@ prints (that is the calibration second).
    the axes are swapped outright, say so — that is a
    mapping change, not a sign.)*
 4. **Long-press exit.** In any cart, press one finger and
-   hold ~1 s: the toy returns to the GALLERY
+   hold it **STILL** ~1 s: the toy returns to the GALLERY
    (`EVENT exit … why=shell-exit`, then `screen=gallery`).
+   Also check the inverse: relaunch, press, drag well away
+   from the start point, and keep holding for 2 s — the
+   cart must stay running (dragging never exits).
 5. **Two-finger settings.** Relaunch a cart, touch with one
    finger and add a second finger promptly: SETTINGS opens
    and the sim pauses. Tap a parameter row, tap its right

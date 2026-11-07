@@ -91,10 +91,18 @@ static inline toy_event_t toy_prod_key_event(uint32_t key)
  * has no up-code), plus the two runner-synthesised shell
  * gestures from toy_shell.h:
  *
- *   LONG-PRESS: one contact held >= TOY_PROD_LONG_PRESS_MS
- *   while it is the ONLY active contact synthesises KEY_ESC
- *   once (exit when RUNNING; back on shell screens - the
- *   shell gives KEY_ESC those meanings itself). The press's
+ *   LONG-PRESS: one contact held STILL >=
+ *   TOY_PROD_LONG_PRESS_MS while it is the ONLY active
+ *   contact synthesises KEY_ESC once (exit when RUNNING;
+ *   back on shell screens - the shell gives KEY_ESC those
+ *   meanings itself). "Still" is load-bearing: if the
+ *   contact ever strays more than TOY_PROD_LONG_PRESS_TOL_PX
+ *   from its DOWN point, the timer is cancelled for that
+ *   contact permanently (a drag is a cart verb, never an
+ *   exit; returning to the start point does not re-arm -
+ *   only a fresh DOWN does). Cancellation suppresses only
+ *   the synthesised ESC; DOWN/MOVE/UP forward unchanged.
+ *   The press's
  *   DOWN was already delivered (and forwarded to the cart if
  *   RUNNING) before the timing could be known; toy_shell.h
  *   acknowledges exactly this pattern. After the ESC the
@@ -121,14 +129,17 @@ static inline toy_event_t toy_prod_key_event(uint32_t key)
  * a backwards clock simply delays the long-press.
  */
 #define TOY_PROD_MAX_CONTACTS 2u
-#define TOY_PROD_LONG_PRESS_MS 800u
+#define TOY_PROD_LONG_PRESS_MS 1000u
+#define TOY_PROD_LONG_PRESS_TOL_PX 12 /* glass px from DOWN point */
 #define TOY_PROD_TWO_FINGER_MS 300u
 
 typedef struct {
     bool active;      /* track present in the latest report */
     bool consumed;    /* gesture claimed it: suppress to lift */
     bool long_fired;  /* KEY_ESC already sent for this press */
+    bool long_cancelled; /* moved past tolerance: no ESC this press */
     uint64_t down_ms; /* when this contact went down */
+    int32_t down_cx, down_cy; /* controller-space DOWN point */
     int32_t cx, cy;   /* last controller-space position */
 } toy_prod_contact_t;
 
@@ -145,7 +156,10 @@ static inline void toy_prod_gesture_init(toy_prod_gesture_t *g)
         g->contact[i].active = false;
         g->contact[i].consumed = false;
         g->contact[i].long_fired = false;
+        g->contact[i].long_cancelled = false;
         g->contact[i].down_ms = 0;
+        g->contact[i].down_cx = 0;
+        g->contact[i].down_cy = 0;
         g->contact[i].cx = 0;
         g->contact[i].cy = 0;
     }
@@ -180,6 +194,7 @@ static inline size_t toy_prod_gesture_report(
             c->active = false;
             c->consumed = false;
             c->long_fired = false;
+            c->long_cancelled = false;
         }
     }
     if (!toy_prod_gesture_any_active(g)) {
@@ -202,7 +217,10 @@ static inline size_t toy_prod_gesture_report(
                                TOY_PROD_TWO_FINGER_MS;
             c->active = true;
             c->long_fired = false;
+            c->long_cancelled = false;
             c->down_ms = now_ms;
+            c->down_cx = px[id];
+            c->down_cy = py[id];
             c->cx = px[id];
             c->cy = py[id];
             if (is_pair) {
@@ -221,16 +239,29 @@ static inline size_t toy_prod_gesture_report(
                                            TOY_EV_POINTER_DOWN, id,
                                            c->cx, c->cy);
             }
-        } else if (!c->consumed &&
-                   (px[id] != c->cx || py[id] != c->cy)) {
-            c->cx = px[id];
-            c->cy = py[id];
-            if (n < out_cap)
-                toy_prod_pointer_event(&out[n++], TOY_EV_POINTER_MOVE,
-                                       id, c->cx, c->cy);
         } else {
-            c->cx = px[id];
-            c->cy = py[id];
+            /* Straying past tolerance from the DOWN point makes
+             * this contact a drag: cancel its long-press for
+             * good (re-arming needs a fresh DOWN). The event
+             * stream below is untouched by the cancellation. */
+            int64_t dx = (int64_t)px[id] - c->down_cx;
+            int64_t dy = (int64_t)py[id] - c->down_cy;
+            if (dx * dx + dy * dy >
+                (int64_t)TOY_PROD_LONG_PRESS_TOL_PX *
+                    TOY_PROD_LONG_PRESS_TOL_PX)
+                c->long_cancelled = true;
+            if (!c->consumed &&
+                (px[id] != c->cx || py[id] != c->cy)) {
+                c->cx = px[id];
+                c->cy = py[id];
+                if (n < out_cap)
+                    toy_prod_pointer_event(&out[n++],
+                                           TOY_EV_POINTER_MOVE, id,
+                                           c->cx, c->cy);
+            } else {
+                c->cx = px[id];
+                c->cy = py[id];
+            }
         }
     }
     return n;
@@ -248,7 +279,7 @@ static inline size_t toy_prod_gesture_poll(toy_prod_gesture_t *g,
         return 0;
     unsigned id = g->contact[0].active ? 0u : 1u;
     toy_prod_contact_t *c = &g->contact[id];
-    if (c->consumed || c->long_fired)
+    if (c->consumed || c->long_fired || c->long_cancelled)
         return 0;
     if (now_ms < c->down_ms ||
         now_ms - c->down_ms < TOY_PROD_LONG_PRESS_MS)

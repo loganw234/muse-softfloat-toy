@@ -244,17 +244,17 @@ static void test_gesture_long_press(void)
     toy_prod_gesture_init(&g);
     toy_event_t out[6];
     (void)report(&g, 1000, true, true, 50, 50, false, 0, 0, out);
-    CHECK(toy_prod_gesture_poll(&g, 1799, out, 6) == 0,
-          "799 ms: no ESC yet");
-    size_t n = toy_prod_gesture_poll(&g, 1800, out, 6);
+    CHECK(toy_prod_gesture_poll(&g, 1999, out, 6) == 0,
+          "999 ms: no ESC yet");
+    size_t n = toy_prod_gesture_poll(&g, 2000, out, 6);
     CHECK(n == 1 && out[0].type == TOY_EV_KEY_DOWN &&
               out[0].id == TOY_KEY_ESC,
-          "800 ms: KEY_ESC exactly");
-    CHECK(toy_prod_gesture_poll(&g, 2000, out, 6) == 0,
+          "1000 ms stationary: KEY_ESC exactly");
+    CHECK(toy_prod_gesture_poll(&g, 2300, out, 6) == 0,
           "ESC fires once per press");
-    n = report(&g, 2100, true, true, 90, 90, false, 0, 0, out);
+    n = report(&g, 2400, true, true, 90, 90, false, 0, 0, out);
     CHECK(n == 0, "consumed contact: MOVE suppressed");
-    n = report(&g, 2200, true, false, 0, 0, false, 0, 0, out);
+    n = report(&g, 2500, true, false, 0, 0, false, 0, 0, out);
     CHECK(n == 0, "consumed contact: UP suppressed (no leak)");
     /* A fresh press after lift behaves normally again. */
     n = report(&g, 3000, true, true, 50, 50, false, 0, 0, out);
@@ -266,6 +266,69 @@ static void test_gesture_long_press(void)
     (void)report(&g, 3750, false, true, 50, 50, true, 60, 60, out);
     CHECK(toy_prod_gesture_poll(&g, 5000, out, 6) == 0,
           "two contacts: long-press suppressed");
+}
+
+static void test_gesture_long_press_drag(void)
+{
+    /* The live defect: a press-hold-drag (a cart's core verb)
+     * must never exit. Moving 20 px from the DOWN point at
+     * 500 ms cancels the timer; the forwarded stream is
+     * otherwise exactly DOWN/MOVE/.../UP. */
+    toy_prod_gesture_t g;
+    toy_prod_gesture_init(&g);
+    toy_event_t out[6];
+    size_t n = report(&g, 0, true, true, 100, 100, false, 0, 0, out);
+    CHECK(n == 1 && out[0].type == TOY_EV_POINTER_DOWN,
+          "drag: DOWN forwarded");
+    n = report(&g, 500, true, true, 120, 100, false, 0, 0, out);
+    CHECK(n == 1 && out[0].type == TOY_EV_POINTER_MOVE,
+          "drag: 20 px MOVE forwarded (and cancels long-press)");
+    CHECK(toy_prod_gesture_poll(&g, 1000, out, 6) == 0,
+          "drag: no ESC at 1000 ms");
+    CHECK(toy_prod_gesture_poll(&g, 2000, out, 6) == 0,
+          "drag: no ESC at 2000 ms either");
+    n = report(&g, 2100, true, true, 160, 130, false, 0, 0, out);
+    CHECK(n == 1 && out[0].type == TOY_EV_POINTER_MOVE,
+          "drag: later MOVEs still forwarded (not consumed)");
+    n = report(&g, 2200, true, false, 0, 0, false, 0, 0, out);
+    CHECK(n == 1 && out[0].type == TOY_EV_POINTER_UP,
+          "drag: UP forwarded (not consumed)");
+
+    /* Jitter inside the 12 px tolerance (incl. exactly 12 px:
+     * cancellation needs MORE than the tolerance) still fires. */
+    toy_prod_gesture_init(&g);
+    (void)report(&g, 0, true, true, 100, 100, false, 0, 0, out);
+    n = report(&g, 400, true, true, 112, 100, false, 0, 0, out);
+    CHECK(n == 1 && out[0].type == TOY_EV_POINTER_MOVE,
+          "jitter: 12 px MOVE forwarded");
+    (void)report(&g, 700, true, true, 108, 108, false, 0, 0, out);
+    CHECK(toy_prod_gesture_poll(&g, 999, out, 6) == 0,
+          "jitter: quiet at 999 ms");
+    n = toy_prod_gesture_poll(&g, 1000, out, 6);
+    CHECK(n == 1 && out[0].type == TOY_EV_KEY_DOWN &&
+              out[0].id == TOY_KEY_ESC,
+          "jitter within tolerance: ESC at 1000 ms");
+    n = report(&g, 1100, true, false, 0, 0, false, 0, 0, out);
+    CHECK(n == 0, "jitter: post-ESC UP suppressed (consumed)");
+
+    /* Drag out and back to the start point, then hold: the
+     * cancel is permanent for this contact. A fresh press
+     * after lift re-arms normally. */
+    toy_prod_gesture_init(&g);
+    (void)report(&g, 0, true, true, 100, 100, false, 0, 0, out);
+    (void)report(&g, 300, true, true, 120, 100, false, 0, 0, out);
+    n = report(&g, 600, true, true, 100, 100, false, 0, 0, out);
+    CHECK(n == 1 && out[0].type == TOY_EV_POINTER_MOVE,
+          "drag-return: MOVE back to origin forwarded");
+    CHECK(toy_prod_gesture_poll(&g, 1000, out, 6) == 0,
+          "drag-return: no ESC at 1000 ms (cancel is permanent)");
+    CHECK(toy_prod_gesture_poll(&g, 5000, out, 6) == 0,
+          "drag-return: still no ESC at 5000 ms");
+    (void)report(&g, 5100, true, false, 0, 0, false, 0, 0, out);
+    (void)report(&g, 6000, true, true, 100, 100, false, 0, 0, out);
+    n = toy_prod_gesture_poll(&g, 7000, out, 6);
+    CHECK(n == 1 && out[0].id == TOY_KEY_ESC,
+          "fresh stationary press after a cancelled drag re-arms");
 }
 
 static void test_gesture_two_finger(void)
@@ -446,6 +509,7 @@ int main(void)
     printf("gestures (fake clock)\n");
     test_gesture_basic();
     test_gesture_long_press();
+    test_gesture_long_press_drag();
     test_gesture_two_finger();
     printf("tilt gate / dial / calibration\n");
     test_tilt_gate();

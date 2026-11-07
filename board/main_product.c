@@ -37,7 +37,8 @@
  *
  * Gestures (board/PRODUCT.md): tap/drag = pointer; device
  * tilt = TILT; turning the whole device = DIAL; long-press
- * (>=800 ms, one finger) = KEY_ESC exit/back; two-finger tap
+ * (one finger held STILL >=1000 ms; a drag never exits) =
+ * KEY_ESC exit/back; two-finger tap
  * while RUNNING = KEY_X settings. Serial (USB CDC) is
  * output-only TOY-PROD-* markers, integer prints. No AXP
  * writes, GPIO25 untouched, no core/cart changes.
