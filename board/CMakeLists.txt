@@ -288,3 +288,34 @@ endif()
 pico_enable_stdio_usb(toy_board 1)
 pico_enable_stdio_uart(toy_board 0)
 pico_add_extra_outputs(toy_board)
+
+# Display bring-up firmware (toy5-display D0, board/DISPLAY.md):
+# CO5300 lite-the-panel test for the Waveshare
+# RP2350-Touch-AMOLED-1.75. RP2350 only - the pin map and the
+# panel exist only on that board - so the RP2040 configure does
+# not even see this target. It shares no sources with toy_board
+# except the platform-independent framing core
+# (display_co5300.c, host-tested by tools/display_test.c).
+if(_toy_platform_actual STREQUAL "rp2350")
+    add_executable(toy_display_test
+        main_display_test.c
+        display_co5300.c
+        display_qspi_pio.c
+    )
+    pico_generate_pio_header(toy_display_test
+        ${CMAKE_CURRENT_LIST_DIR}/display_qspi.pio)
+    target_compile_definitions(toy_display_test PRIVATE
+        TOY_GIT_HEAD="${TOY_GIT_HEAD}")
+    target_compile_options(toy_display_test PRIVATE -O2)
+    target_link_libraries(toy_display_test
+        pico_stdlib pico_unique_id hardware_pio hardware_i2c)
+    # Same no-hardware-float discipline as toy_board: core 1 is
+    # never launched here either, and no flash writes happen, so
+    # PICO_FLASH_ASSUME_CORE1_SAFE is not needed (and pico_flash
+    # is not linked).
+    pico_set_float_implementation(toy_display_test none)
+    pico_set_double_implementation(toy_display_test compiler)
+    pico_enable_stdio_usb(toy_display_test 1)
+    pico_enable_stdio_uart(toy_display_test 0)
+    pico_add_extra_outputs(toy_display_test)
+endif()
