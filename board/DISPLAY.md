@@ -83,8 +83,10 @@ black screen before exhausting the diagnostic order below.
 - SCL cap: datasheet s6.4.1 (p107) Note 3 limits 4-wire QSPI
   pixel transfers to 50 MHz. The vendor example exceeds this
   (200 MHz system overclock, undivided PIO — see Report
-  discrepancies). D0 runs 25 MHz at the stock 150 MHz system
-  clock.
+  discrepancies). D0 ran 25 MHz at the stock 150 MHz system
+  clock; toy5-pace raises the target to the 50 MHz cap, which
+  the integer PIO divider lands at an actual 37.5 MHz (see
+  the toy5-pace addendum below).
 
 ### Init sequence
 
@@ -135,9 +137,10 @@ then watch USB CDC for the `TOY-DISP-*` stream.
 Serial phases: `TOY-DISP-BOOT` → per-device `TOY-DISP-I2C
 addr=0x..` lines + `TOY-DISP-I2C-SCAN-DONE` (read-only scan;
 expect the roster of the shared bus — touch, IMU, RTC, PMIC,
-codec) → `TOY-DISP-QSPI scl_hz=25000000 ...` → `TOY-DISP-INIT
+codec) → `TOY-DISP-QSPI scl_hz=37500000 ...` → `TOY-DISP-INIT
 rc=0` → black fill with a `TOY-DISP-TIME ... full_frame_us=`
-line (expect roughly 35–45 ms at 25 MHz quad; a full frame is
+line (wire floor 23.2 ms at 37.5 MHz quad since toy5-pace,
+was 34.8 ms at 25 MHz; a full frame is
 466x466x2 bytes) → `TOY-DISP-TE edges=...` (a scanning panel
 pulses TE about once per frame, so a 300 ms window should count
 a few dozen edges).
@@ -180,7 +183,8 @@ white.
    `CO5300_COL_OFFSET`/`CO5300_ROW_OFFSET` and re-run the host
    test (it pins the expected RAM coordinates).
 7. Sparkle/garbage only at speed: drop `DISPLAY_QSPI_SCL_HZ`
-   (25 MHz → 12.5 MHz) before suspecting anything else.
+   (50 MHz target / 37.5 MHz actual → 25 MHz target / actual)
+   before suspecting anything else.
 
 ## Not in this parcel
 
@@ -280,3 +284,51 @@ self-test (`-DTOY_PROD_SELFTEST=ON`, default OFF) adds three
 legacy-perrow-blue - whose `TOY-PROD-SELFTEST` outcomes separate
 product bring-up, the production flush, and the old per-row
 framing (now with the fixed drain) in a single flash.
+
+## Addendum (toy5-pace): flush maps, QSPI clock, sim budget
+
+Owner decisions behind this parcel: rendering stays 360x360
+with the integer upscale to the 466 glass, and pacing is
+frame-rate first (the sim runs slower than wall clock on
+heavy carts rather than the frame rate collapsing). Measured
+baseline (real RP2350, attract, 25 MHz QSPI): flush was a
+constant 62.7 ms/frame against a 34.8 ms wire floor;
+sim-bound carts at fixed demo steps ran 1-4 fps (pendulum
+sim 1,659 ms/frame, pendwave 2,529, mandelbrot 14,690,
+cloud 795, synspec 216); render-bound carts spent solclock
+370 ms, pond 347 ms and attitude 155 ms in `render()` per
+frame (that cost is inside the carts writing the 360
+framebuffer - `render_us` in PACE brackets only the cart
+call, and carts never call the presenter, so there is no
+presenter-side component to it).
+
+Three changes: (1) the upscale no longer divides per pixel -
+`toy_presenter_init` precomputes the 466-entry column/row
+source maps from the pinned `toy_presenter_src_coord`
+formula (1,864 B), expansion is a table lookup, and the 106
+glass rows that repeat a source row reuse the last expanded
+row (cache reset every flush; `tools/presenter_test.c` pins
+all of it pixel-identical to the formula). (2) QSPI SCL
+target raised to the datasheet 50 MHz cap (V0.00 s6.4 p107:
+TSCYC write min 20 ns, Note 3 caps 4-wire QSPI at 50 MHz);
+with the integer PIO divider at the stock 150 MHz sysclk
+that is divider 2 = an actual 37.5 MHz, the nearest below
+the cap (divider 1 = 75 MHz violates TSCYC; a fractional
+1.5 would emit sub-20 ns cycles). Wire floor for a full
+frame: (466x466x2 pixel bytes x 2 nibbles + 20 command bytes
+x 8 cycles) / 37.5 MHz = 23.2 ms, down from 34.8 ms at
+25 MHz. `toy_display_test` shares this transport and simply
+runs at the faster rate (`TOY-DISP-QSPI scl_hz=37500000`).
+(3) The attract loop time-boxes sim work per presented
+frame (`TOY_PROD_SIM_BUDGET_US`, default 30,000): at least
+one step always runs, stepping stops at
+`demo_steps_per_frame` or at the budget, checked once per
+step. A single over-budget step still completes and the
+frame presents after it. `TOY-PROD-PACE` gains `steps=` (the
+window's total steps), so the sim-speed ratio vs fixed
+pacing is steps / (frames x steps_per_frame); `steps ==
+frames` marks the one-step-per-frame regime. Determinism is
+untouched by construction: state after N steps is the same
+as ever (feed/apply/step order and step-0 setup unchanged);
+only how many steps happen per presented frame - runner
+pacing, not cart behaviour - varies with wall clock.

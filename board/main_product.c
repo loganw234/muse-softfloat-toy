@@ -22,7 +22,19 @@
  *     Entries past step 0 are never applied here.
  *   - the framebuffer persists across frames within a cart
  *     (trail carts fade; see presenter.h) and is cleared, with
- *     a black fill to glass, on every cart switch.
+ *     a black fill to glass, on every cart switch;
+ *   - pacing is FRAME-RATE FIRST (toy5-pace, owner decision):
+ *     each presented frame steps the sim at least once, then
+ *     keeps stepping until demo_steps_per_frame steps ran or
+ *     the TOY_PROD_SIM_BUDGET_US budget is spent. On heavy
+ *     carts the sim therefore runs slower than wall clock
+ *     instead of the frame rate collapsing. State after N
+ *     steps is untouched (feed/apply/step order and step-0
+ *     setup unchanged); only how many steps happen per
+ *     presented frame varies, which is runner-layer pacing,
+ *     not cart behaviour. TOY-PROD-PACE reports steps= per
+ *     window so the sim-speed ratio is
+ *     steps / (frames * demo_steps_per_frame).
  * Serial (USB CDC) is output-only: TOY-PROD-* markers with
  * integer prints only. No AXP writes, GPIO25 untouched.
  */
@@ -45,6 +57,18 @@
 
 /* Wall-clock seconds per cart in the attract rotation. */
 #define TOY_PROD_CART_SECONDS 20u
+
+/* Per-frame sim time budget (toy5-pace, frame-rate first): a
+ * frame always runs at least one step, then stops stepping
+ * once this many microseconds of sim work have elapsed, even
+ * if demo_steps_per_frame has not been reached. A single step
+ * longer than the budget still completes and the frame
+ * presents after it (steps=frames in PACE marks that regime).
+ * Cheap carts finish all their demo steps well inside the
+ * budget and pace exactly as before. */
+#ifndef TOY_PROD_SIM_BUDGET_US
+#define TOY_PROD_SIM_BUDGET_US 30000u
+#endif
 
 /* Product brightness: constant raw DBV (51h), same modest level
  * toy_display_test used for its patterns. Panel stays on. */
@@ -102,20 +126,30 @@ static void run_cart_attract(const toy_cart_t *cart)
     toy_fb_clear(fb, 0x0000u);
     (void)toy_presenter_blank(&presenter); /* black between carts */
 
-    printf("TOY-PROD-CART cart=%s title=%s steps_per_frame=%lu seconds=%lu\n",
+    printf("TOY-PROD-CART cart=%s title=%s steps_per_frame=%lu "
+           "seconds=%lu sim_budget_us=%lu\n",
            cart->name, cart->title,
            (unsigned long)cart->demo_steps_per_frame,
-           (unsigned long)TOY_PROD_CART_SECONDS);
+           (unsigned long)TOY_PROD_CART_SECONDS,
+           (unsigned long)TOY_PROD_SIM_BUDGET_US);
 
     uint64_t slot_start = time_us_64();
     uint64_t slot_end = slot_start +
                         (uint64_t)TOY_PROD_CART_SECONDS * 1000000ull;
     uint64_t pace_mark = slot_start + 1000000ull;
     uint64_t sim_us = 0, render_us = 0, flush_us = 0;
-    unsigned long frames = 0, seconds = 0;
+    unsigned long frames = 0, seconds = 0, steps_window = 0;
 
     while (time_us_64() < slot_end) {
         uint64_t t0 = time_us_64();
+        /* Time-boxed stepper (toy5-pace): at least one step,
+         * then step until demo_steps_per_frame ran or the sim
+         * budget deadline passed. The time check runs once
+         * per step, after the step, and only when further
+         * steps remain - the step sequence itself (feed ->
+         * apply -> step) is unchanged per step. */
+        uint64_t sim_deadline = t0 + TOY_PROD_SIM_BUDGET_US;
+        uint32_t steps_done = 0;
         for (uint32_t s = 0; s < cart->demo_steps_per_frame; s++) {
             int frc = toy_feed_step(cart, state_buf,
                                     sig_created ? &prod_sig_src : 0,
@@ -131,7 +165,12 @@ static void run_cart_attract(const toy_cart_t *cart)
             toy_apply_queue(cart, state_buf, &prod_live_queue,
                             TOY_MAX_EVENTS_PER_STEP);
             cart->step(state_buf);
+            steps_done++;
+            if (steps_done < cart->demo_steps_per_frame &&
+                time_us_64() >= sim_deadline)
+                break;
         }
+        steps_window += steps_done;
         uint64_t t1 = time_us_64();
         cart->render(state_buf, fb);
         uint64_t t2 = time_us_64();
@@ -148,13 +187,20 @@ static void run_cart_attract(const toy_cart_t *cart)
 
         if (t3 >= pace_mark) {
             seconds++;
+            /* steps= is the window's total sim steps: against
+             * frames * demo_steps_per_frame it gives the
+             * frame-rate-first sim-speed ratio (1.0 = budget
+             * never bit; steps == frames = one step per frame,
+             * the single-step-over-budget regime). */
             printf("TOY-PROD-PACE cart=%s sim_us=%llu render_us=%llu "
-                   "flush_us=%llu frames=%lu seconds=%lu\n",
+                   "flush_us=%llu frames=%lu steps=%lu seconds=%lu\n",
                    cart->name, (unsigned long long)sim_us,
                    (unsigned long long)render_us,
-                   (unsigned long long)flush_us, frames, seconds);
+                   (unsigned long long)flush_us, frames, steps_window,
+                   seconds);
             sim_us = render_us = flush_us = 0;
             frames = 0;
+            steps_window = 0;
             pace_mark = t3 + 1000000ull;
         }
     }
@@ -169,9 +215,13 @@ static int selftest_legacy_perrow_flush(void)
 {
     toy_fb_t *fb = toy_presenter_fb(&presenter);
     for (int dy = 0; dy < CO5300_HEIGHT; dy++) {
-        int sy = toy_presenter_src_coord(dy, fb->h, CO5300_HEIGHT);
+        /* Precomputed maps (toy5-pace); pixel-identical to the
+         * formula path this used before, host-pinned - the
+         * per-row WINDOW framing stays the variable under test. */
+        int sy = presenter.row_src[dy];
         toy_presenter_expand_row(&fb->px[(size_t)sy * (size_t)fb->w],
-                                 fb->w, presenter.row, CO5300_WIDTH);
+                                 presenter.col_src, presenter.row,
+                                 CO5300_WIDTH);
         int rc = co5300_write_pixels(&panel, 0, dy, CO5300_WIDTH - 1, dy,
                                      presenter.row, CO5300_WIDTH);
         if (rc != CO5300_OK)

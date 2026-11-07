@@ -7,12 +7,24 @@
  * RAM evidence quotes this symbol). */
 static uint16_t presenter_px[TOY_PRESENTER_FB_PIXELS];
 
+void toy_presenter_build_map(uint16_t *map, int src_size, int dst_size)
+{
+    for (int d = 0; d < dst_size; d++)
+        map[d] = (uint16_t)toy_presenter_src_coord(d, src_size, dst_size);
+}
+
 void toy_presenter_init(toy_presenter_t *p, co5300_t *panel)
 {
     p->panel = panel;
     p->fb.w = TOY_PRESENTER_FB_W;
     p->fb.h = TOY_PRESENTER_FB_H;
     p->fb.px = presenter_px;
+    /* The only divisions in the presenter run here, once:
+     * 466 column + 466 row map entries from the pinned
+     * formula. Flush is table lookup only (toy5-pace). */
+    toy_presenter_build_map(p->col_src, p->fb.w, CO5300_WIDTH);
+    toy_presenter_build_map(p->row_src, p->fb.h, CO5300_HEIGHT);
+    p->cached_sy = -1;
 }
 
 toy_fb_t *toy_presenter_fb(toy_presenter_t *p)
@@ -27,11 +39,12 @@ int toy_presenter_src_coord(int dst, int src_size, int dst_size)
     return ((2 * dst + 1) * src_size) / (2 * dst_size);
 }
 
-void toy_presenter_expand_row(const uint16_t *src_row, int src_w,
+void toy_presenter_expand_row(const uint16_t *src_row,
+                              const uint16_t *col_src,
                               uint16_t *dst_row, int dst_w)
 {
     for (int dx = 0; dx < dst_w; dx++)
-        dst_row[dx] = src_row[toy_presenter_src_coord(dx, src_w, dst_w)];
+        dst_row[dx] = src_row[col_src[dx]];
 }
 
 int toy_presenter_flush(toy_presenter_t *p)
@@ -54,10 +67,19 @@ int toy_presenter_flush(toy_presenter_t *p)
                                  CO5300_HEIGHT - 1);
     if (rc != CO5300_OK)
         return rc;
+    /* Row cache is per-flush only: the framebuffer may have
+     * changed since the last flush, but it cannot change
+     * during this one (flush never writes it, single thread),
+     * so a repeated source row may reuse the expanded row. */
+    p->cached_sy = -1;
     for (int dy = 0; dy < CO5300_HEIGHT; dy++) {
-        int sy = toy_presenter_src_coord(dy, p->fb.h, CO5300_HEIGHT);
-        toy_presenter_expand_row(&p->fb.px[(size_t)sy * (size_t)p->fb.w],
-                                 p->fb.w, p->row, CO5300_WIDTH);
+        int sy = p->row_src[dy];
+        if (sy != p->cached_sy) {
+            toy_presenter_expand_row(
+                &p->fb.px[(size_t)sy * (size_t)p->fb.w], p->col_src,
+                p->row, CO5300_WIDTH);
+            p->cached_sy = sy;
+        }
         rc = co5300_stream_pixels(p->panel, p->row, CO5300_WIDTH);
         if (rc != CO5300_OK)
             break;
