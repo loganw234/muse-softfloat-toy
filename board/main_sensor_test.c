@@ -23,7 +23,10 @@
  *
  * SET command (type it into the CDC terminal during phase
  * 5):  SET 2026-11-07 12:34:56 5   (last field weekday 0-6)
- * It is the only write path to the RTC in this firmware.
+ * Fields are UTC: the product clock's register convention
+ * is UTC in the chip, tz applied at display only
+ * (board/clock_civil.h), and SET writes the registers
+ * verbatim. It is the only write path to the RTC here.
  * Nothing writes the AXP2101 or ES8311 at all.
  */
 #include <stdio.h>
@@ -279,7 +282,7 @@ int main(void)
     printf("SENSOR-TEST PHASE 5 live %us: tilt/rotate the board, "
            "tap and drag on the glass\n", LIVE_MS / 1000u);
     printf("SENSOR-TEST tip: send 'SET 2026-11-07 12:34:56 5' + Enter "
-           "to set the RTC (weekday 0-6 last)\n");
+           "to set the RTC in UTC (weekday 0-6 last)\n");
 
     touch_track_t tracks[CST9217_MAX_POINTS];
     memset(tracks, 0, sizeof tracks);

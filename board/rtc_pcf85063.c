@@ -104,3 +104,32 @@ int pcf85063_clear_os(toy_i2c_t *bus)
                        (uint8_t)(sec & (uint8_t)~PCF85063_SECONDS_OS) };
     return rtc_write(i2c, buf, sizeof buf);
 }
+
+int pcf85063_set_os(toy_i2c_t *bus)
+{
+    if (!bus)
+        return -1;
+    i2c_inst_t *i2c = (i2c_inst_t *)bus;
+    uint8_t sec = 0;
+    int rc = rtc_read_at(i2c, PCF85063_REG_SECONDS, &sec, 1);
+    if (rc)
+        return rc;
+    uint8_t buf[2] = { PCF85063_REG_SECONDS,
+                       (uint8_t)(sec | PCF85063_SECONDS_OS) };
+    return rtc_write(i2c, buf, sizeof buf);
+}
+
+int pcf85063_read_ram(toy_i2c_t *bus, uint8_t *out)
+{
+    if (!bus || !out)
+        return -1;
+    return rtc_read_at((i2c_inst_t *)bus, PCF85063_REG_RAM_BYTE, out, 1);
+}
+
+int pcf85063_write_ram(toy_i2c_t *bus, uint8_t value)
+{
+    if (!bus)
+        return -1;
+    uint8_t buf[2] = { PCF85063_REG_RAM_BYTE, value };
+    return rtc_write((i2c_inst_t *)bus, buf, sizeof buf);
+}

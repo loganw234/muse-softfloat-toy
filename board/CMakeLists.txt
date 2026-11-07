@@ -187,9 +187,9 @@ option(TOY_CKPT_FLASH_SELFTEST
     "Compile the (uncalled) flash checkpoint round-trip selftest" OFF)
 
 # toy_product boot glass self-test (board/main_product.c): three
-# ~1.5 s solid-colour stages after panel init, before attract,
-# for black-glass triage on hardware. OFF for shipped builds;
-# ON only for a diagnostic flash candidate.
+# ~1.5 s solid-colour stages after panel init, before the
+# shell, for black-glass triage on hardware. OFF for shipped
+# builds; ON only for a diagnostic flash candidate.
 option(TOY_PROD_SELFTEST
     "Boot glass self-test stages in toy_product (diagnostic)" OFF)
 
@@ -362,21 +362,29 @@ if(_toy_platform_actual STREQUAL "rp2350")
     pico_add_extra_outputs(toy_sensor_test)
 endif()
 
-# Product firmware (toy5-presenter): presenter + attract
-# rotation on glass (board/main_product.c, board/presenter.*,
-# board/DISPLAY.md addendum). RP2350 only, like toy_display_test
-# above, so the RP2040 configure never sees it. This block is
-# deliberately self-contained (own source list, own pins) so a
-# sibling target appended below it unions trivially.
+# Product firmware (toy5-shell): the shell runner on glass
+# (board/main_product.c + board/product_input.h, presenter
+# from toy5-presenter, board/PRODUCT.md). RP2350 only, like
+# toy_display_test above, so the RP2040 configure never sees
+# it. This block is deliberately self-contained (own source
+# list, own pins) so a sibling target appended below it
+# unions trivially. Clock pick is per-target: toy_product
+# links clock_rtc.c (PCF85063-backed toy_clock.h) while
+# toy_board above keeps the always-unset clock_board.c stub.
 if(_toy_platform_actual STREQUAL "rp2350")
     add_executable(toy_product
         main_product.c
         presenter.c
         display_co5300.c
         display_qspi_pio.c
+        clock_rtc.c
+        rtc_pcf85063.c
+        imu_qmi8658.c
+        touch_cst9217.c
         ${TOY_ROOT}/core/toy_fb.c
         ${TOY_ROOT}/core/toy_carts.c
         ${TOY_ROOT}/core/toy_input.c
+        ${TOY_ROOT}/core/toy_shell.c
         ${TOY_ROOT}/core/cart_fig8.c
         ${TOY_ROOT}/core/cart_pendulum.c
         ${TOY_ROOT}/core/cart_carousel.c
@@ -423,9 +431,9 @@ if(_toy_platform_actual STREQUAL "rp2350")
         target_compile_definitions(toy_product PRIVATE
             TOY_PRESENTER_MODE_FULL466=${TOY_PRESENTER_MODE_FULL466})
     endif()
-    target_compile_options(toy_product PRIVATE -O2)
+    target_compile_options(toy_product PRIVATE -O2 -Wall -Wextra)
     target_link_libraries(toy_product
-        pico_stdlib pico_unique_id hardware_pio)
+        pico_stdlib pico_unique_id hardware_pio hardware_i2c)
     # Same no-hardware-float discipline as toy_board (audit
     # above): sim maths stays muse-softfloat integer code; the
     # presenter/upscale path is integer-only by construction.
