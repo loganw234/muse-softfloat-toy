@@ -188,3 +188,59 @@ No touch, no TE-synchronised updates (TE is only observed), no
 DMA, no banded `toy_fb` presenter, no shell wiring, no AXP2101
 anything, no read path (`03h` reads of panel ID/status are the
 natural next diagnostic if D0 stays black).
+
+## Addendum (toy5-presenter): product presenter + attract
+
+Status update: the panel is glass-proven with the D0 code above
+(466x466, full-frame flush 34.8 ms at 25 MHz QSPI, column
+offset +6, zero AXP writes). The presenter forecast as "banded"
+above did NOT land banded - see the framebuffer decision below.
+
+`toy_product` (`board/main_product.c` + `board/presenter.*`,
+RP2350-only CMake target appended after `toy_display_test`) is
+the first on-glass product firmware. It boots the panel at a
+constant DBV `0x50`, then cycles all 23 registered cartridges
+in registry order, 20 s of wall clock each
+(`TOY_PROD_CART_SECONDS`), at each descriptor's demo steps per
+frame, forever. Serial markers: `TOY-PROD-BOOT`,
+`TOY-PROD-PRESENTER`, `TOY-PROD-MEM` (linker-symbol memory
+evidence), `TOY-PROD-CART` per switch, and once per second
+`TOY-PROD-PACE cart= sim_us= render_us= flush_us= frames=
+seconds=` (window totals, integer prints only). Runner posture
+is live, not proof: feed carts use the synthetic on-device
+source in `feed -> apply -> step` order exactly as
+`main_board.c`; the apply slot drains an always-empty live
+queue (no touch/IMU/RTC/shell yet); proof scripts are not
+replayed except step-0 parameter setup, mirrored from emu
+frames mode. The framebuffer persists across frames within a
+cart (the emu runner contract) and is cleared, with a black
+glass fill, only on cart switches.
+
+Framebuffer decision, by measurement (full table in the parcel
+report): a full 466x466 RGB565 framebuffer (434,312 B) plus the
+65,536 B cart state buffer does not fit RP2350 main RAM - the
+same source built with `-DTOY_PRESENTER_MODE_FULL466=1` fails
+to link ("region RAM overflowed by 2080 bytes"; .bss
+518,496 B against the 512 KiB region, core-0 stack reserved
+separately as 4,096 B in SCRATCH_Y via `PICO_STACK_SIZE=4096`).
+Shipped mode is therefore a 360x360 framebuffer (259,200 B -
+the size the emulator renders) upscaled to the glass during
+flush: centre-aligned nearest neighbour,
+`src(d) = ((2d+1) * 360) / (2*466)` in integer math on both
+axes, pinned pixel-for-pixel by `tools/presenter_test.c`. The
+shipped link leaves 173,032 B of main RAM free after .data,
+.bss and the heap reserve. Banded rendering was rejected: with
+all bands stored it is the full framebuffer again, and
+re-rendering per band would need a clip/offset window `toy_fb`
+does not have. (Observed while measuring: current trail carts
+redraw from state ring buffers each render, so persistence is
+preserved as a forward contract, not because a shipped cart
+reads the framebuffer back.)
+
+Host checks: `tools/presenter_test.c` (mapping, crafted
+pixels, fade persistence, harmonograph/fig8 sequences
+pixel-identical to a plain-fb reference after upscale) and
+`tools/display_test.c` both pass; `tools/run.sh check` passes.
+Flashing stays lead-only by serial as above; expect the
+`TOY-PROD-*` stream over USB CDC and a new cartridge on glass
+every 20 s, starting with fig8.
