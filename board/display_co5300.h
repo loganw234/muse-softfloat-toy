@@ -42,6 +42,7 @@
 #define CO5300_ERR_ARG (-1)    /* NULL device/sink/pixel pointer */
 #define CO5300_ERR_WINDOW (-2) /* window outside the 466x466 glass */
 #define CO5300_ERR_COUNT (-3)  /* pixel count != window area */
+#define CO5300_ERR_STATE (-4)  /* stream call out of sequence */
 
 /* Transport sink. All callbacks are required.
  *   cs          asserted != 0 pulls CS low, 0 releases it high.
@@ -64,6 +65,10 @@ typedef struct {
 typedef struct {
     co5300_sink_t sink;
     uint8_t brightness; /* last DBV written via 51h */
+    /* Open pixel-stream state (co5300_stream_* below). Owned
+     * by the driver; callers must not touch these fields. */
+    size_t stream_remaining; /* pixels still owed to the window */
+    int stream_open;
 } co5300_t;
 
 /* Bind a sink. Returns CO5300_ERR_ARG if any callback is NULL. */
@@ -93,6 +98,28 @@ int co5300_set_window(co5300_t *dev, int x0, int y0, int x1, int y1);
  * framebuffer is needed beyond the caller's source rows. */
 int co5300_write_pixels(co5300_t *dev, int x0, int y0, int x1, int y1,
                         const uint16_t *pixels, size_t count);
+
+/* Streaming pixel write, for callers that produce a window's
+ * pixels incrementally (e.g. the presenter expanding one row at
+ * a time): begin sets the window and opens ONE RAMWR stream;
+ * pixels appends host-order RGB565 pixels in row-major order
+ * over any number of calls; end closes the stream. The wire
+ * output is byte-identical to one co5300_fill-shaped full-window
+ * stream (CASET, RASET, one CS-held RAMWR), which is the shape
+ * proven on glass; it must not be emulated with per-row
+ * write_pixels calls (the toy5-presenter black-glass bug: 466
+ * short streams per frame never landed on glass). The caller
+ * owes exactly the window area in pixels across pixels calls:
+ * an overrunning call is rejected whole (CO5300_ERR_COUNT,
+ * nothing written), and end with pixels still owed closes the
+ * stream (CS released) and returns CO5300_ERR_COUNT. Calls out
+ * of sequence return CO5300_ERR_STATE and emit nothing. While a
+ * stream is open, no other driver call may be made on the
+ * device. */
+int co5300_stream_begin(co5300_t *dev, int x0, int y0, int x1, int y1);
+int co5300_stream_pixels(co5300_t *dev, const uint16_t *pixels,
+                         size_t count);
+int co5300_stream_end(co5300_t *dev);
 
 /* Set the window, then stream one solid RGB565 colour over it.
  * Streams from a small pattern buffer; a full-screen fill needs

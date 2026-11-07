@@ -41,20 +41,29 @@ int toy_presenter_flush(toy_presenter_t *p)
                                CO5300_HEIGHT - 1, p->fb.px,
                                TOY_PRESENTER_FB_PIXELS);
 #else
-    /* One window per glass row, public driver API only. Cost:
-     * 466 x (CASET+RASET+RAMWR = 20 1-wire bytes) ~= 3 ms at
-     * 25 MHz on top of the ~35 ms pixel stream; the on-device
-     * flush_us pacing line is the authority. */
+    /* ONE full-glass window and ONE CS-held RAMWR stream per
+     * frame, with expanded rows streamed inside it - the exact
+     * wire shape of the glass-proven co5300_fill. (The first
+     * shipped version issued one 466x1 write_pixels window per
+     * row, 466 streams per frame, and the glass stayed black
+     * while every call returned CO5300_OK: see the CS-drain
+     * note in display_qspi_pio.c. Do not go back to per-row
+     * windows; tools/presenter_test.c pins the single-stream
+     * framing.) */
+    int rc = co5300_stream_begin(p->panel, 0, 0, CO5300_WIDTH - 1,
+                                 CO5300_HEIGHT - 1);
+    if (rc != CO5300_OK)
+        return rc;
     for (int dy = 0; dy < CO5300_HEIGHT; dy++) {
         int sy = toy_presenter_src_coord(dy, p->fb.h, CO5300_HEIGHT);
         toy_presenter_expand_row(&p->fb.px[(size_t)sy * (size_t)p->fb.w],
                                  p->fb.w, p->row, CO5300_WIDTH);
-        int rc = co5300_write_pixels(p->panel, 0, dy, CO5300_WIDTH - 1, dy,
-                                     p->row, CO5300_WIDTH);
+        rc = co5300_stream_pixels(p->panel, p->row, CO5300_WIDTH);
         if (rc != CO5300_OK)
-            return rc;
+            break;
     }
-    return CO5300_OK;
+    int erc = co5300_stream_end(p->panel);
+    return rc != CO5300_OK ? rc : erc;
 #endif
 }
 

@@ -2,9 +2,10 @@
  *
  * Drives board/display_co5300.c against a capturing fake sink and
  * checks the logical wire stream: init sequence and delays,
- * window offsets/clipping, RGB565 wire byte order, framebuffer-
- * free fill chunking, and the 1-wire command byte expansion used
- * by the PIO transport.
+ * window offsets/clipping, RGB565 wire byte order, the streamed
+ * (co5300_stream_*) single-CS framing and its sequencing/count
+ * discipline, framebuffer-free fill chunking, and the 1-wire
+ * command byte expansion used by the PIO transport.
  *
  * Build (from repo root):
  *   gcc -O2 -std=c11 -Wall -Wextra -Werror -Iboard \
@@ -251,6 +252,89 @@ static void test_write_pixels_byte_order(void)
           CO5300_ERR_ARG);
 }
 
+/* Streaming API (toy5-presenter black-glass fix): begin+pixels
+ * in several calls+end must emit EXACTLY the same logical wire
+ * stream as one co5300_write_pixels over the same window and
+ * pixels (one CASET, one RASET, one CS-held RAMWR), because
+ * that single-stream shape is what the glass-proven fill uses
+ * and what the presenter now depends on. */
+static void test_stream_matches_write_pixels(void)
+{
+    static uint8_t ref_cmd[256], ref_pix[256];
+    size_t ref_cmd_len, ref_pix_len;
+    unsigned ref_asserts, ref_releases;
+    const uint16_t px[8] = { 0xf800, 0x07e0, 0x001f, 0x1234,
+                             0xffff, 0x0000, 0x8410, 0xffe0 };
+
+    fake_reset();
+    bind_fake();
+    CHECK(co5300_write_pixels(&dev, 2, 3, 5, 4, px, 8) == CO5300_OK);
+    CHECK(fake.cmd_len <= sizeof ref_cmd && fake.pix_len <= sizeof ref_pix);
+    memcpy(ref_cmd, fake.cmd, fake.cmd_len);
+    memcpy(ref_pix, fake.pix, fake.pix_len);
+    ref_cmd_len = fake.cmd_len;
+    ref_pix_len = fake.pix_len;
+    ref_asserts = fake.cs_asserts;
+    ref_releases = fake.cs_releases;
+    CHECK(ref_asserts == 3 && ref_releases == 3); /* CASET,RASET,RAMWR */
+
+    fake_reset();
+    bind_fake();
+    CHECK(co5300_stream_begin(&dev, 2, 3, 5, 4) == CO5300_OK);
+    /* Irregular split, including a zero-length call. */
+    CHECK(co5300_stream_pixels(&dev, px, 3) == CO5300_OK);
+    CHECK(co5300_stream_pixels(&dev, px + 3, 0) == CO5300_OK);
+    CHECK(co5300_stream_pixels(&dev, px + 3, 1) == CO5300_OK);
+    CHECK(co5300_stream_pixels(&dev, px + 4, 4) == CO5300_OK);
+    CHECK(co5300_stream_end(&dev) == CO5300_OK);
+    CHECK(fake.cmd_len == ref_cmd_len && fake.pix_len == ref_pix_len);
+    if (fake.cmd_len == ref_cmd_len)
+        CHECK(memcmp(fake.cmd, ref_cmd, ref_cmd_len) == 0);
+    if (fake.pix_len == ref_pix_len)
+        CHECK(memcmp(fake.pix, ref_pix, ref_pix_len) == 0);
+    CHECK(fake.cs_asserts == ref_asserts);
+    CHECK(fake.cs_releases == ref_releases);
+    CHECK(!fake.overflow);
+}
+
+/* Stream sequencing and count discipline: out-of-sequence and
+ * overrunning calls emit nothing and never leave CS dangling,
+ * so a presenter bug cannot wedge the panel interface. */
+static void test_stream_state_errors(void)
+{
+    const uint16_t px[4] = { 1, 2, 3, 4 };
+
+    fake_reset();
+    bind_fake();
+    CHECK(co5300_stream_pixels(&dev, px, 1) == CO5300_ERR_STATE);
+    CHECK(co5300_stream_end(&dev) == CO5300_ERR_STATE);
+    CHECK(fake.cmd_len == 0 && fake.pix_len == 0);
+    CHECK(fake.cs_asserts == 0 && fake.cs_releases == 0);
+
+    /* Bad window rejected before anything is emitted. */
+    CHECK(co5300_stream_begin(&dev, 0, 0, 466, 0) == CO5300_ERR_WINDOW);
+    CHECK(fake.cmd_len == 0 && fake.cs_asserts == 0);
+
+    CHECK(co5300_stream_begin(&dev, 0, 0, 3, 0) == CO5300_OK);
+    /* Double begin and interleaved write_pixels refused. */
+    CHECK(co5300_stream_begin(&dev, 0, 0, 3, 0) == CO5300_ERR_STATE);
+    CHECK(co5300_write_pixels(&dev, 0, 0, 3, 0, px, 4) ==
+          CO5300_ERR_STATE);
+    /* Overrun rejected whole: nothing written for that call. */
+    CHECK(co5300_stream_pixels(&dev, px, 3) == CO5300_OK);
+    size_t pix_before = fake.pix_len;
+    CHECK(co5300_stream_pixels(&dev, px, 2) == CO5300_ERR_COUNT);
+    CHECK(fake.pix_len == pix_before);
+    /* Early end still releases CS and reports the shortfall. */
+    CHECK(co5300_stream_end(&dev) == CO5300_ERR_COUNT);
+    CHECK(fake.cs_asserts == fake.cs_releases);
+    CHECK(fake.cs_level == 0);
+    /* Device usable again immediately. */
+    CHECK(co5300_fill(&dev, 0, 0, 3, 0, 0xffff) == CO5300_OK);
+    CHECK(fake.cs_asserts == fake.cs_releases);
+    CHECK(!fake.overflow);
+}
+
 static void test_fill_streams_without_framebuffer(void)
 {
     fake_reset();
@@ -305,6 +389,8 @@ int main(void)
     test_window_offsets();
     test_window_rejects();
     test_write_pixels_byte_order();
+    test_stream_matches_write_pixels();
+    test_stream_state_errors();
     test_fill_streams_without_framebuffer();
     test_expand_cmd_byte();
     if (failures) {

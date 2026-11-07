@@ -41,6 +41,8 @@ int co5300_bind(co5300_t *dev, const co5300_sink_t *sink)
         return CO5300_ERR_ARG;
     dev->sink = *sink;
     dev->brightness = 0;
+    dev->stream_remaining = 0;
+    dev->stream_open = 0;
     return dev_ok(dev) ? CO5300_OK : CO5300_ERR_ARG;
 }
 
@@ -207,22 +209,12 @@ int co5300_set_window(co5300_t *dev, int x0, int y0, int x1, int y1)
     return CO5300_OK;
 }
 
-int co5300_write_pixels(co5300_t *dev, int x0, int y0, int x1, int y1,
-                        const uint16_t *pixels, size_t count)
+/* Convert host-order pixels to wire bytes (high byte first) in
+ * fixed chunks and hand them to the sink, inside an already-open
+ * pixel stream. Chunk boundaries are invisible on the wire. */
+static void send_pixels(co5300_t *dev, const uint16_t *pixels,
+                        size_t count)
 {
-    if (!dev_ok(dev) || !pixels)
-        return CO5300_ERR_ARG;
-    if (!window_ok(x0, y0, x1, y1))
-        return CO5300_ERR_WINDOW;
-    size_t area = (size_t)(x1 - x0 + 1) * (size_t)(y1 - y0 + 1);
-    if (count != area)
-        return CO5300_ERR_COUNT;
-    int rc = co5300_set_window(dev, x0, y0, x1, y1);
-    if (rc)
-        return rc;
-    pixels_begin(dev);
-    /* Wire order is high byte first; convert in fixed chunks so
-     * arbitrarily large windows need no intermediate buffer. */
     uint8_t chunk[128];
     size_t done = 0;
     while (done < count) {
@@ -236,8 +228,69 @@ int co5300_write_pixels(co5300_t *dev, int x0, int y0, int x1, int y1,
         dev->sink.pixel_bytes(dev->sink.ctx, chunk, 2 * npx);
         done += npx;
     }
-    pixels_end(dev);
+}
+
+int co5300_stream_begin(co5300_t *dev, int x0, int y0, int x1, int y1)
+{
+    if (!dev_ok(dev))
+        return CO5300_ERR_ARG;
+    if (dev->stream_open)
+        return CO5300_ERR_STATE;
+    if (!window_ok(x0, y0, x1, y1))
+        return CO5300_ERR_WINDOW;
+    int rc = co5300_set_window(dev, x0, y0, x1, y1);
+    if (rc)
+        return rc;
+    pixels_begin(dev);
+    dev->stream_remaining =
+        (size_t)(x1 - x0 + 1) * (size_t)(y1 - y0 + 1);
+    dev->stream_open = 1;
     return CO5300_OK;
+}
+
+int co5300_stream_pixels(co5300_t *dev, const uint16_t *pixels,
+                         size_t count)
+{
+    if (!dev_ok(dev) || !pixels)
+        return CO5300_ERR_ARG;
+    if (!dev->stream_open)
+        return CO5300_ERR_STATE;
+    if (count > dev->stream_remaining)
+        return CO5300_ERR_COUNT;
+    send_pixels(dev, pixels, count);
+    dev->stream_remaining -= count;
+    return CO5300_OK;
+}
+
+int co5300_stream_end(co5300_t *dev)
+{
+    if (!dev_ok(dev))
+        return CO5300_ERR_ARG;
+    if (!dev->stream_open)
+        return CO5300_ERR_STATE;
+    pixels_end(dev);
+    dev->stream_open = 0;
+    size_t owed = dev->stream_remaining;
+    dev->stream_remaining = 0;
+    return owed ? CO5300_ERR_COUNT : CO5300_OK;
+}
+
+int co5300_write_pixels(co5300_t *dev, int x0, int y0, int x1, int y1,
+                        const uint16_t *pixels, size_t count)
+{
+    if (!dev_ok(dev) || !pixels)
+        return CO5300_ERR_ARG;
+    if (!window_ok(x0, y0, x1, y1))
+        return CO5300_ERR_WINDOW;
+    size_t area = (size_t)(x1 - x0 + 1) * (size_t)(y1 - y0 + 1);
+    if (count != area)
+        return CO5300_ERR_COUNT;
+    int rc = co5300_stream_begin(dev, x0, y0, x1, y1);
+    if (rc)
+        return rc;
+    rc = co5300_stream_pixels(dev, pixels, count);
+    int erc = co5300_stream_end(dev);
+    return rc ? rc : erc;
 }
 
 int co5300_fill(co5300_t *dev, int x0, int y0, int x1, int y1,

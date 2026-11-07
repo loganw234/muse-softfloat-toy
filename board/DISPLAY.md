@@ -244,3 +244,39 @@ pixel-identical to a plain-fb reference after upscale) and
 Flashing stays lead-only by serial as above; expect the
 `TOY-PROD-*` stream over USB CDC and a new cartridge on glass
 every 20 s, starting with fig8.
+
+### Black-glass fix (toy5-presenter follow-up)
+
+First on-glass result for the parcel above: serial perfect
+(`INIT rc=0`, per-second `PACE`, no `FLUSH-ERR`), glass black.
+Isolation was immediate: the merged `toy_display_test`
+reflashed and cycled correctly, so panel + init + `co5300_fill`
+were glass-proven and the fault sat in the presenter's flush
+shape or its transport conditions. Root cause, in merged D0
+code plainly: `wait_idle` in `display_qspi_pio.c` tested the
+sticky PIO TXSTALL flag without clearing it first. A mid-stream
+FIFO underrun (the CPU refilling in 128-byte conversion chunks
+makes underruns routine; product flush measured ~71 ms/frame
+against ~38 ms of wire time, i.e. the machine stalls about
+half the flush) arms that flag long before the stream ends, so
+CS could rise while the final byte was still shifting out of
+the OSR - truncating the last parameter byte of short CASET/
+RASET command streams, after which the panel can silently drop
+the address window and the following pixel stream lands
+nowhere. `toy_display_test` never armed it: its conversion-free
+fill loop stays ahead of the FIFO (34.8 ms full frame =
+wire-bound). Two fixes land together: (1) `wait_idle` now waits
+for FIFO empty, clears TXSTALL, then waits for a fresh stall
+event (with a short already-stalled backstop); (2) the driver
+gained a streaming API (`co5300_stream_begin/pixels/end`) and
+the presenter flush is now ONE full-glass window with expanded
+rows streamed inside a single CS - the fill's exact wire shape -
+instead of 466 per-row windows per frame. `tools/display_test.c`
+pins streamed output byte-identical to `co5300_write_pixels`
+plus the sequencing/count errors; `tools/presenter_test.c`
+pins exactly one RAMWR stream per flush. A diagnostic boot
+self-test (`-DTOY_PROD_SELFTEST=ON`, default OFF) adds three
+~1.5 s stages to `toy_product` - fill-red, presenter-green,
+legacy-perrow-blue - whose `TOY-PROD-SELFTEST` outcomes separate
+product bring-up, the production flush, and the old per-row
+framing (now with the fixed drain) in a single flash.

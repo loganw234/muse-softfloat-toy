@@ -50,6 +50,15 @@
  * toy_display_test used for its patterns. Panel stays on. */
 #define TOY_PROD_DBV 0x50u
 
+/* Boot glass self-test (toy5-presenter black-glass diagnosis):
+ * compile with -DTOY_PROD_SELFTEST=ON (CMake option, default
+ * OFF; see CMakeLists.txt). Three ~1.5 s solid-colour stages
+ * run after panel init, before attract, each bracketing one
+ * candidate fault domain; see prod_selftest() below. */
+#ifndef TOY_PROD_SELFTEST
+#define TOY_PROD_SELFTEST 0
+#endif
+
 /* Linker-script symbols for the boot memory evidence line
  * (pico_standard_link script_includes define all of these). */
 extern char __data_start__, __data_end__;
@@ -151,6 +160,82 @@ static void run_cart_attract(const toy_cart_t *cart)
     }
 }
 
+#if TOY_PROD_SELFTEST
+/* The pre-fix per-row flush, kept only for this self-test: one
+ * 466x1 co5300_write_pixels window per glass row (466 CASET+
+ * RASET+RAMWR streams per frame). Deliberately not in
+ * presenter.c; production flush streams rows inside one CS. */
+static int selftest_legacy_perrow_flush(void)
+{
+    toy_fb_t *fb = toy_presenter_fb(&presenter);
+    for (int dy = 0; dy < CO5300_HEIGHT; dy++) {
+        int sy = toy_presenter_src_coord(dy, fb->h, CO5300_HEIGHT);
+        toy_presenter_expand_row(&fb->px[(size_t)sy * (size_t)fb->w],
+                                 fb->w, presenter.row, CO5300_WIDTH);
+        int rc = co5300_write_pixels(&panel, 0, dy, CO5300_WIDTH - 1, dy,
+                                     presenter.row, CO5300_WIDTH);
+        if (rc != CO5300_OK)
+            return rc;
+    }
+    return CO5300_OK;
+}
+
+/* Three stages, ~1.5 s each, TOY-PROD-SELFTEST markers with rc.
+ * What each stage discriminates (stated before any flash):
+ *   fill-red: co5300_fill RED over the full glass. The exact
+ *     path toy_display_test proved on this panel. RED visible
+ *     => panel init + transport + fill are healthy inside the
+ *     product binary. Black => the fault is in product-context
+ *     bring-up, not the presenter; stop and diff against
+ *     toy_display_test instead.
+ *   presenter-green: fb cleared GREEN with toy_fb_clear, then
+ *     the production toy_presenter_flush (single streamed
+ *     window). No cart code involved. GREEN visible => fb
+ *     wiring, row expansion and the streamed flush are proven
+ *     in this binary; if attract then stays black, the fault
+ *     moves to carts/runner. Black while red showed => the
+ *     presenter/flush path is still broken on device despite
+ *     host tests passing.
+ *   legacy-perrow-blue: fb cleared BLUE, flushed with the
+ *     pre-fix per-row algorithm above (but with the fixed PIO
+ *     CS drain). BLUE visible => the CS-drain fix alone
+ *     rehabilitates per-row windows, convicting the stale
+ *     TXSTALL truncation as the root cause. Black/garbled
+ *     while green showed => per-row CASET/RASET+RAMWR streams
+ *     are themselves unsafe on this panel at this rate, and
+ *     the single-stream presenter is the load-bearing fix.
+ * Ends with the fb and glass black, ready for attract. */
+static void prod_selftest(void)
+{
+    toy_fb_t *fb = toy_presenter_fb(&presenter);
+    int rc;
+
+    printf("TOY-PROD-SELFTEST stage=fill-red begin\n");
+    rc = co5300_fill(&panel, 0, 0, CO5300_WIDTH - 1,
+                     CO5300_HEIGHT - 1, 0xf800u);
+    printf("TOY-PROD-SELFTEST stage=fill-red rc=%d hold_ms=1500\n", rc);
+    sleep_ms(1500);
+
+    toy_fb_clear(fb, 0x07e0u);
+    printf("TOY-PROD-SELFTEST stage=presenter-green begin\n");
+    rc = toy_presenter_flush(&presenter);
+    printf("TOY-PROD-SELFTEST stage=presenter-green rc=%d hold_ms=1500\n",
+           rc);
+    sleep_ms(1500);
+
+    toy_fb_clear(fb, 0x001fu);
+    printf("TOY-PROD-SELFTEST stage=legacy-perrow-blue begin\n");
+    rc = selftest_legacy_perrow_flush();
+    printf("TOY-PROD-SELFTEST stage=legacy-perrow-blue rc=%d "
+           "hold_ms=1500\n", rc);
+    sleep_ms(1500);
+
+    toy_fb_clear(fb, 0x0000u);
+    (void)toy_presenter_blank(&presenter);
+    printf("TOY-PROD-SELFTEST done\n");
+}
+#endif /* TOY_PROD_SELFTEST */
+
 int main(void)
 {
     stdio_init_all();
@@ -205,6 +290,9 @@ int main(void)
     toy_presenter_init(&presenter, &panel);
     /* GRAM is undefined after init; first act is black. */
     (void)toy_presenter_blank(&presenter);
+#if TOY_PROD_SELFTEST
+    prod_selftest();
+#endif
 
     printf("TOY-PROD-ATTRACT carts=%d seconds_each=%lu\n", toy_cart_count,
            (unsigned long)TOY_PROD_CART_SECONDS);

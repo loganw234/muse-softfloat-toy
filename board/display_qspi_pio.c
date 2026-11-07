@@ -79,11 +79,35 @@ uint32_t display_qspi_scl_hz(const display_qspi_t *t)
     return t->scl_hz;
 }
 
-/* Wait until every queued byte has left the pins: FIFO empty,
- * then the state machine's TX-stall debug flag shows it tried to
- * pull from the empty FIFO (i.e. the last nibble is out). Clear
- * the flag so the next transfer's wait sees a fresh event. The
- * caller always queues at least one byte before waiting. */
+/* Wait until every queued byte has left the pins. FIFO empty
+ * alone is not enough: the last word may still be shifting out
+ * of the OSR (up to one byte, a few SM cycles), and raising CS
+ * inside that window truncates the final byte on the wire.
+ *
+ * The TX-stall debug flag marks the state machine stalling on
+ * the empty FIFO, which happens only after the final byte's
+ * sampling edges are done - but it is a STICKY event flag, and
+ * the machine also stalls mid-stream whenever the CPU falls
+ * behind the FIFO for a moment (in the presenter flush that is
+ * routine: the sink is refilled in 128-byte conversion chunks,
+ * so an underrun stall happens inside almost every stream).
+ * Testing the sticky flag without clearing it first therefore
+ * passes instantly on a stale event and CS rises while the
+ * last byte is still on the pins. Against a short command
+ * stream that truncates its final parameter byte - for RASET,
+ * the row-window end - and the panel can silently drop the
+ * window, so pixel streams land nowhere (toy5-presenter
+ * black-glass bug; the conversion-free fill path stays ahead
+ * of the FIFO and never armed the stale flag, which is why
+ * toy_display_test never saw it).
+ *
+ * Correct order: wait for FIFO empty (now at most one byte is
+ * in flight), CLEAR the sticky flag, then wait for a fresh
+ * stall event. If the machine had already stalled before the
+ * clear, the byte is long gone but the flag might not re-set
+ * until the next stall, so a short backstop timeout - far
+ * longer than one byte takes to shift at any divider used
+ * here - ends the wait in that case. */
 static void wait_idle(display_qspi_t *t)
 {
     PIO pio = tpio(t);
@@ -91,7 +115,9 @@ static void wait_idle(display_qspi_t *t)
     uint32_t stall_bit = 1u << (PIO_FDEBUG_TXSTALL_LSB + sm);
     while (!pio_sm_is_tx_fifo_empty(pio, sm))
         tight_loop_contents();
-    while (!(pio->fdebug & stall_bit))
+    pio->fdebug = stall_bit;
+    uint64_t deadline = time_us_64() + 4;
+    while (!(pio->fdebug & stall_bit) && time_us_64() < deadline)
         tight_loop_contents();
     pio->fdebug = stall_bit;
 }

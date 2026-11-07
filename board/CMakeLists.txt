@@ -186,6 +186,13 @@ file(GLOB LIB_SRC ${LIB}/src/*.c)
 option(TOY_CKPT_FLASH_SELFTEST
     "Compile the (uncalled) flash checkpoint round-trip selftest" OFF)
 
+# toy_product boot glass self-test (board/main_product.c): three
+# ~1.5 s solid-colour stages after panel init, before attract,
+# for black-glass triage on hardware. OFF for shipped builds;
+# ON only for a diagnostic flash candidate.
+option(TOY_PROD_SELFTEST
+    "Boot glass self-test stages in toy_product (diagnostic)" OFF)
+
 add_executable(toy_board
     main_board.c
     clock_board.c
@@ -368,6 +375,9 @@ if(_toy_platform_actual STREQUAL "rp2350")
         ${LIB}/include ${TOY_ROOT}/core ${CMAKE_CURRENT_LIST_DIR})
     target_compile_definitions(toy_product PRIVATE
         TOY_GIT_HEAD="${TOY_GIT_HEAD}")
+    if(TOY_PROD_SELFTEST)
+        target_compile_definitions(toy_product PRIVATE TOY_PROD_SELFTEST=1)
+    endif()
     # Explicit stack reservation (crt0 .stack spacer in
     # SCRATCH_Y; main_product.c prints the reserved size from
     # __StackTop-__StackBottom as boot evidence). Presenter

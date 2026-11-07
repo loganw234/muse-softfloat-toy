@@ -8,7 +8,8 @@
  *   2. crafted-pixel expansion: 1px features at corners, edge
  *      and centre land on exactly their mapped destination
  *      footprint - no more, no fewer - through the real
- *      co5300_write_pixels wire path into a capturing sink;
+ *      co5300_stream_* wire path into a capturing sink, with
+ *      the flush framing pinned to a single RAMWR stream;
  *   3. persistence: flush never modifies the framebuffer and
  *      toy_fb_fade accumulates across flushes exactly as on a
  *      plain framebuffer; plus a harmonograph stepped+rendered
@@ -103,8 +104,10 @@ static void cap_cmd_fn(void *ctx, const uint8_t *bytes, size_t len)
     (void)ctx; (void)bytes; (void)len;
     if (!cap_cs)
         cap_overflow = 1;
-    /* Count RAMWR pixel-stream headers (32 00 2c 00): one per
-     * flushed row in upscale mode. */
+    /* Count RAMWR pixel-stream headers (32 00 2c 00). Flushing
+     * must be ONE stream per frame (glass-proven fill shape);
+     * the original per-row framing issued 466 and the glass
+     * stayed black (see presenter.c / display_qspi_pio.c). */
     if (len == 4 && bytes[0] == 0x32 && bytes[2] == 0x2c)
         cap_windows++;
 }
@@ -138,9 +141,9 @@ static void setup_presenter(void)
 }
 
 /* Glass pixel (x,y) from the captured wire stream. Upscale
- * flush writes rows top-to-bottom, each full width, so the
- * pixel byte stream is the 466x466 image row-major,
- * high byte first (driver contract). */
+ * flush streams expanded rows top-to-bottom inside one
+ * full-window RAMWR, so the pixel byte stream is the 466x466
+ * image row-major, high byte first (driver contract). */
 static uint16_t glass_px(int x, int y)
 {
     size_t i = ((size_t)y * 466 + (size_t)x) * 2;
@@ -155,7 +158,10 @@ static void flush_capture(void)
     CHECK(toy_presenter_flush(&presenter) == CO5300_OK);
     CHECK(!cap_overflow);
     CHECK(cap_len == CAP_PIX);
-    CHECK(cap_windows == 466); /* one RAMWR stream per glass row */
+    /* Exactly one RAMWR stream per flush. This is the
+     * black-glass regression pin: 466 here means the per-row
+     * framing that never landed on glass is back. */
+    CHECK(cap_windows == 1);
 }
 
 /* Whole-image check: glass == src sampled through map_ref. */
