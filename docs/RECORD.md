@@ -372,3 +372,39 @@ cartridges, one core, three platforms, one hash. The
 RP2350 kit arrives Friday: drivers, live sources, and the
 flash power-cut proof are next.
 
+
+## Hardware day: the toy is a product on its own glass (2026-11-06)
+
+The Waveshare RP2350-Touch-AMOLED-1.75 arrived (466x466
+CO5300 AMOLED, CST9217 touch, QMI8658 IMU, PCF85063 RTC,
+AXP2101 PMIC, TF slot). In one day: the 23-cartridge proof
+reproduced host == RP2350 at every reported step (24m45s
+vs 55 min on RP2040, ~2.2x); an original QSPI PIO display
+driver lit the panel (full frame 34.8 ms at 25 MHz, zero
+PMIC writes - the panel rides the logic rail); touch, IMU
+and RTC drivers were proven against the owner's hands
+(IMU still-desk noise ~0.6 mg/axis, gyro bias +5.3 dps on
+X, touch after a mode-handshake fix); and the shell
+became the product firmware - gallery, settings, running
+carts, RTC clockface - owner-operated on glass.
+
+Three defects only live hardware could convict, each
+fixed the same day: a sticky PIO TXSTALL flag let chip
+select truncate window commands (the panel stayed black
+while every return code said fine); a long-press exit
+gesture warred with drag-operated carts (now stationary-
+only); and one aborted I2C transfer wedged the shared
+sensor bus until a 9-clock self-heal was added. Frame
+pacing is measured, not guessed (flush 54.5 ms/frame at
+37.5 MHz QSPI after the upscale-map optimization, CPU
+FIFO feeding is the next bound; pond steps at 52 ms on
+this silicon). Owner decisions on record: 360-upscale
+rendering kept (native 466 misses SRAM by 2,088 bytes),
+frame-rate-first sim budgeting.
+
+Five toy5 parcels, all planted-verified 5/5 (cumulative
+200/200 across 41 parcels). What is still synthetic:
+the feed cartridges' IMU streams, heartbeat's chest
+numbers, and the flash checkpoint power-cut behaviour.
+Those are the next proofs.
+
