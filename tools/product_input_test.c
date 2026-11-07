@@ -497,6 +497,143 @@ static void test_calibration(void)
     CHECK(!toy_prod_cal_finish(&c, &bias), "single jolt rejects all");
 }
 
+/* --- IRQ pending merge + gallery tap-launch (touchfix2) -------- */
+
+static toy_event_t ptr_ev(uint32_t type, uint32_t id, int32_t x, int32_t y)
+{
+    toy_event_t e = { 0 };
+    e.type = type;
+    e.id = id;
+    e.x = x;
+    e.y = y;
+    return e;
+}
+
+static void test_touch_pending_merge(void)
+{
+    CHECK(!toy_prod_touch_pending_merge(false, false),
+          "merge: no latch, INT high = not pending");
+    CHECK(toy_prod_touch_pending_merge(true, false),
+          "merge: IRQ latch alone is pending (pulse already rose)");
+    CHECK(toy_prod_touch_pending_merge(false, true),
+          "merge: INT low now is pending");
+    CHECK(toy_prod_touch_pending_merge(true, true),
+          "merge: both is pending");
+}
+
+static void test_gallery_row_math(void)
+{
+    /* Same constants as core/toy_shell.c ML_G_ROW_Y=-620,
+     * ML_G_ROW_H=155, 6 visible rows -> band [-620, 310). */
+    CHECK(toy_prod_gallery_row_at(-620, 0, 25) == 0, "row band top = row 0");
+    CHECK(toy_prod_gallery_row_at(-466, 0, 25) == 0, "y=-466 still row 0");
+    CHECK(toy_prod_gallery_row_at(-465, 0, 25) == 1, "y=-465 = row 1");
+    CHECK(toy_prod_gallery_row_at(309, 0, 25) == 5, "y=309 = last visible row");
+    CHECK(toy_prod_gallery_row_at(310, 0, 25) == -1,
+          "y=310 = detail gap, no row");
+    CHECK(toy_prod_gallery_row_at(-621, 0, 25) == -1, "above band: no row");
+    CHECK(toy_prod_gallery_row_at(740, 0, 25) == -1,
+          "footer y>=740: no row (never tap-launched)");
+    CHECK(toy_prod_gallery_row_at(900, 0, 25) == -1, "deep footer: no row");
+    CHECK(toy_prod_gallery_row_at(-620, 7, 25) == 7, "scroll offsets the row");
+    CHECK(toy_prod_gallery_row_at(309, 20, 25) == -1,
+          "row past total rejected");
+}
+
+static void test_tap_launch(void)
+{
+    toy_prod_tap_launch_t t;
+    toy_event_t synth;
+    /* Gallery: 23 carts -> total 25 rows; y=-400 is row 1
+     * ((-400+620)/155 = 1) at scroll 0. */
+    toy_event_t down = ptr_ev(TOY_EV_POINTER_DOWN, 0, 0, -400);
+    toy_event_t up = ptr_ev(TOY_EV_POINTER_UP, 0, 10, -390);
+
+    toy_prod_tap_launch_init(&t);
+    CHECK(toy_prod_tap_launch_note_down(&t, 1000, true, false, 0, 23, 1,
+                                        &down),
+          "tap: selecting DOWN on cart row arms");
+    CHECK(toy_prod_tap_launch_take_up(&t, 1200, true, 0, 23, 1, &up,
+                                      &synth) &&
+              synth.type == TOY_EV_POINTER_DOWN && synth.id == 0 &&
+              synth.x == 0 && synth.y == -400,
+          "tap: short still UP synthesises DOWN at DOWN coords");
+    CHECK(!toy_prod_tap_launch_take_up(&t, 1250, true, 0, 23, 1, &up,
+                                       &synth),
+          "tap: synth fires at most once per tap");
+
+    /* Already launched by the real DOWN: never arm. */
+    toy_prod_tap_launch_init(&t);
+    CHECK(!toy_prod_tap_launch_note_down(&t, 0, true, true, 0, 23, 1, &down),
+          "tap: START_CART DOWN does not arm");
+    /* Not gallery (SETTINGS/CLOCKSET/RUNNING posture). */
+    CHECK(!toy_prod_tap_launch_note_down(&t, 0, false, false, 0, 23, 1,
+                                         &down),
+          "tap: non-gallery DOWN does not arm");
+    /* Footer tap (RUN/SET zone). */
+    toy_event_t foot = ptr_ev(TOY_EV_POINTER_DOWN, 0, -300, 800);
+    CHECK(!toy_prod_tap_launch_note_down(&t, 0, true, false, 0, 23, 1,
+                                         &foot),
+          "tap: footer DOWN does not arm");
+    /* Virtual rows: row 23 = SET CLOCK, row 24 = CLOCK FACE
+     * (visible when scrolled: y=-620 with scroll 23/24). */
+    toy_event_t vdown = ptr_ev(TOY_EV_POINTER_DOWN, 0, 0, -620);
+    CHECK(!toy_prod_tap_launch_note_down(&t, 0, true, false, 23, 23, 23,
+                                         &vdown),
+          "tap: SET CLOCK row does not arm");
+    CHECK(!toy_prod_tap_launch_note_down(&t, 0, true, false, 24, 23, 24,
+                                         &vdown),
+          "tap: CLOCK FACE row does not arm");
+    /* DOWN that did not select this row (selection elsewhere). */
+    CHECK(!toy_prod_tap_launch_note_down(&t, 0, true, false, 0, 23, 5,
+                                         &down),
+          "tap: row != selection after DOWN does not arm");
+
+    /* Slow press: 501 ms is not a tap; exactly 500 ms is. */
+    toy_prod_tap_launch_init(&t);
+    (void)toy_prod_tap_launch_note_down(&t, 0, true, false, 0, 23, 1, &down);
+    CHECK(!toy_prod_tap_launch_take_up(&t, 501, true, 0, 23, 1, &up, &synth),
+          "tap: 501 ms press does not launch");
+    toy_prod_tap_launch_init(&t);
+    (void)toy_prod_tap_launch_note_down(&t, 0, true, false, 0, 23, 1, &down);
+    CHECK(toy_prod_tap_launch_take_up(&t, 500, true, 0, 23, 1, &up, &synth),
+          "tap: 500 ms press still launches");
+
+    /* Drag: a MOVE 100 milli away disarms; UP far away too. */
+    toy_prod_tap_launch_init(&t);
+    (void)toy_prod_tap_launch_note_down(&t, 0, true, false, 0, 23, 1, &down);
+    toy_event_t drag = ptr_ev(TOY_EV_POINTER_MOVE, 0, 100, -400);
+    toy_prod_tap_launch_note_move(&t, &drag);
+    toy_event_t up_home = ptr_ev(TOY_EV_POINTER_UP, 0, 0, -400);
+    CHECK(!toy_prod_tap_launch_take_up(&t, 100, true, 0, 23, 1, &up_home,
+                                       &synth),
+          "tap: drag away and back does not launch");
+    toy_prod_tap_launch_init(&t);
+    (void)toy_prod_tap_launch_note_down(&t, 0, true, false, 0, 23, 1, &down);
+    toy_event_t up_far = ptr_ev(TOY_EV_POINTER_UP, 0, 0, -100);
+    CHECK(!toy_prod_tap_launch_take_up(&t, 100, true, 0, 23, 1, &up_far,
+                                       &synth),
+          "tap: UP in another row does not launch");
+
+    /* Screen or selection moved on before the UP. */
+    toy_prod_tap_launch_init(&t);
+    (void)toy_prod_tap_launch_note_down(&t, 0, true, false, 0, 23, 1, &down);
+    CHECK(!toy_prod_tap_launch_take_up(&t, 100, false, 0, 23, 1, &up, &synth),
+          "tap: UP outside gallery does not launch");
+    toy_prod_tap_launch_init(&t);
+    (void)toy_prod_tap_launch_note_down(&t, 0, true, false, 0, 23, 1, &down);
+    CHECK(!toy_prod_tap_launch_take_up(&t, 100, true, 0, 23, 3, &up, &synth),
+          "tap: selection moved before UP does not launch");
+    /* Wrong contact's UP cannot spend the tap. */
+    toy_prod_tap_launch_init(&t);
+    (void)toy_prod_tap_launch_note_down(&t, 0, true, false, 0, 23, 1, &down);
+    toy_event_t up1 = ptr_ev(TOY_EV_POINTER_UP, 1, 0, -400);
+    CHECK(!toy_prod_tap_launch_take_up(&t, 100, true, 0, 23, 1, &up1, &synth),
+          "tap: other finger's UP does not launch");
+    CHECK(toy_prod_tap_launch_take_up(&t, 110, true, 0, 23, 1, &up, &synth),
+          "tap: own UP still launches after other finger lifted");
+}
+
 int main(void)
 {
     printf("clock civil <-> epoch\n");
@@ -515,6 +652,10 @@ int main(void)
     test_tilt_gate();
     test_dial();
     test_calibration();
+    printf("irq merge / gallery tap-launch\n");
+    test_touch_pending_merge();
+    test_gallery_row_math();
+    test_tap_launch();
     if (failures == 0) {
         printf("product_input_test: PASS (%d checks)\n", checks);
         return 0;

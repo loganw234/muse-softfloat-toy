@@ -14,8 +14,15 @@
  *   calibration attempt. Each sensor failure prints a loud
  *   TOY-PROD-*-ERR line and the toy continues without that
  *   sense organ. The shell opens in GALLERY over toy_carts.
- *   loop, every frame: poll touch (INT-gated, sensor-test
- *   discipline) and IMU into toy_event_t via the pure seams
+ *   loop, every frame: service touch FIRST, before step/
+ *   render/flush, so this pass's events drive this frame's
+ *   shell/step decisions. Touch INT (GPIO22) is latched by a
+ *   falling-edge IRQ (vendor flow is one report per edge;
+ *   touchfix2 - a level sample once per ~55 ms frame missed
+ *   pulses that rose during render+flush) and merged with
+ *   the live level into the same cst9217_should_read drain
+ *   policy; IMU joins in the same producer phase. Events
+ *   become toy_event_t via the pure seams
  *   in board/product_input.h; feed EVERY event to
  *   toy_shell_event first and act on its mask (this file's
  *   prod_dispatch mirrors emu/main_emu.c shell_do_actions);
@@ -35,13 +42,19 @@
  * from step 1 on, the live queue is the only input source,
  * so on-glass behaviour is the owner's, not a recording's.
  *
- * Gestures (board/PRODUCT.md): tap/drag = pointer; device
- * tilt = TILT; turning the whole device = DIAL; long-press
- * (one finger held STILL >=1000 ms; a drag never exits) =
- * KEY_ESC exit/back; two-finger tap
- * while RUNNING = KEY_X settings. Serial (USB CDC) is
- * output-only TOY-PROD-* markers, integer prints. No AXP
- * writes, GPIO25 untouched, no core/cart changes.
+ * Gestures (board/PRODUCT.md): tap/drag = pointer; in
+ * GALLERY a single tap on a cart row launches it (runner
+ * confirms the selecting tap on its UP edge, product_input
+ * tap-launch gate; keyboard flow stays select+enter);
+ * device tilt = TILT; turning the whole device = DIAL;
+ * long-press (one finger held STILL >=1000 ms; a drag never
+ * exits) = KEY_ESC exit/back; two-finger tap while RUNNING
+ * = KEY_X settings. Every DOWN acted on prints one
+ * TOY-PROD-TOUCHDBG line (raw/glass/milli/screen/action) so
+ * the touch mirror direction is decidable from serial alone.
+ * Serial (USB CDC) is output-only TOY-PROD-* markers,
+ * integer prints. No AXP writes, GPIO25 untouched, no
+ * core/cart changes.
  */
 #include <stdio.h>
 #include <string.h>
@@ -138,7 +151,28 @@ static bool touch_ok, imu_ok;
 static toy_prod_gesture_t gesture;
 static toy_prod_tilt_gate_t tilt_gate;
 static toy_prod_dial_t dial;
-static bool touch_pending;
+static toy_prod_tap_launch_t tap_launch;
+/* IRQ latch (touchfix2): the GPIO22 falling-edge handler
+ * only sets this flag and counts the edge - no I2C, no
+ * gesture work in IRQ context. The frame loop merges it
+ * with the live INT level (toy_prod_touch_pending_merge)
+ * so a pulse that fell and rose during render+flush still
+ * triggers exactly one drain read at the next pass. */
+static volatile bool touch_irq_pending;
+static volatile unsigned long touch_irq_edges;
+/* Last real DOWN's controller coords per contact, so the
+ * synthesised tap-launch DOWN can log the same TOUCHDBG
+ * fields as the real one that armed it. */
+static int32_t dbg_raw_x[TOY_PROD_MAX_CONTACTS];
+static int32_t dbg_raw_y[TOY_PROD_MAX_CONTACTS];
+
+static void prod_touch_irq(uint gpio, uint32_t events)
+{
+    if (gpio == PIN_TOUCH_INT && (events & GPIO_IRQ_EDGE_FALL)) {
+        touch_irq_pending = true;
+        touch_irq_edges++;
+    }
+}
 static uint64_t next_touch_read_ms, next_touch_probe_ms, next_imu_ms;
 static uint64_t last_imu_ms;
 static bool have_imu_ms;
@@ -266,7 +300,7 @@ static void prod_clock_commit(void)
  * moves into the live queue (FIFO with later live events,
  * shared per-step cap at the next boundary - the tour's
  * choice, and what pauses-in-settings requires). */
-static void prod_dispatch(const toy_event_t *ev)
+static uint32_t prod_dispatch(const toy_event_t *ev)
 {
     uint32_t act = toy_shell_event(&shell, ev);
     if (act & TOY_SH_ACT_START_CART)
@@ -290,32 +324,66 @@ static void prod_dispatch(const toy_event_t *ev)
     if (act & TOY_SH_ACT_FORWARD_TO_CART)
         toy_queue_push(&prod_live_queue, ev);
     note_screen();
+    return act;
+}
+
+/* One TOUCHDBG line per DOWN the runner acts on (real or
+ * the synthesised tap-launch confirm; never MOVE/UP): the
+ * controller-raw point, its post-mirror glass px, the milli
+ * coords the shell actually received, the screen it landed
+ * on, and the action mask the shell returned. Comparing raw
+ * against milli across known finger positions convicts or
+ * clears TOY_PROD_TOUCH_MIRROR in one owner session, and
+ * irq_edges vs DOWN count shows whether reports still die
+ * between edge and drain read. */
+static void prod_touchdbg(const char *src, const toy_event_t *ev,
+                          int32_t raw_x, int32_t raw_y, uint8_t screen,
+                          uint32_t act)
+{
+    printf("TOY-PROD-TOUCHDBG src=%s id=%lu raw=(%ld,%ld) "
+           "glass=(%ld,%ld) milli=(%ld,%ld) screen=%s act=0x%lx "
+           "mirror=%d irq_edges=%lu\n",
+           src, (unsigned long)ev->id, (long)raw_x, (long)raw_y,
+           (long)toy_prod_touch_axis(raw_x),
+           (long)toy_prod_touch_axis(raw_y), (long)ev->x, (long)ev->y,
+           screen_name(screen), (unsigned long)act,
+           TOY_PROD_TOUCH_MIRROR, touch_irq_edges);
 }
 
 /* --- input producers -------------------------------------------- */
 
-/* INT-gated touch poll, main_sensor_test.c discipline: level
- * sampled every frame (GPIO only), reads gated by
- * cst9217_should_read(pending, any-active, 1 Hz probe) and
- * capped at ~50 Hz. NO_REPORT (all-FF window) is benign and
- * never a release; a non-empty frame with no accepted
- * contact is the release frame. Decoded points become
- * events only through the gesture seam. */
+/* IRQ-latched touch service, run at the top of every frame
+ * (before step/render/flush, so this pass's events drive
+ * this frame). The drain policy is the sensor-test one
+ * unchanged - cst9217_should_read(pending, any-active,
+ * 1 Hz probe), reads capped ~50 Hz - except `pending` is
+ * now the IRQ latch merged with the live INT level instead
+ * of a once-per-frame level sample (touchfix2: pulses that
+ * fell and rose during the previous frame's render+flush
+ * were invisible to the level sample and waited for the
+ * 1 Hz probe). The latch is cleared only when a read
+ * actually happens, and before the read, so edges landing
+ * during the I2C transfer re-latch for the next pass.
+ * NO_REPORT (all-FF window) is benign and never a release;
+ * a non-empty frame with no accepted contact is the release
+ * frame. Decoded points become events only through the
+ * gesture seam; DOWNs additionally feed TOUCHDBG and the
+ * gallery tap-launch gate (UP edge confirms a selecting
+ * tap with one synthesised DOWN, GALLERY cart rows only). */
 static void prod_touch_poll(uint64_t now_ms)
 {
     if (!touch_ok)
         return;
-    bool lvl_high = cst9217_int_level(&touch_cfg);
-    if (cst9217_int_is_asserted(lvl_high))
-        touch_pending = true;
+    bool pending = toy_prod_touch_pending_merge(
+        touch_irq_pending, cst9217_int_asserted(&touch_cfg));
     if (now_ms < next_touch_read_ms ||
-        !cst9217_should_read(touch_pending,
+        !cst9217_should_read(pending,
                              toy_prod_gesture_any_active(&gesture),
                              now_ms >= next_touch_probe_ms))
         return;
     next_touch_read_ms = now_ms + TOY_PROD_TOUCH_READ_MS;
     next_touch_probe_ms = now_ms + TOY_PROD_TOUCH_PROBE_MS;
-    touch_pending = false;
+    touch_irq_pending = false;
     cst9217_report_t rep;
     int rc = cst9217_read_report(&touch_cfg, &rep, NULL);
     if (rc == CST9217_NO_REPORT)
@@ -346,8 +414,38 @@ static void prod_touch_poll(uint64_t now_ms)
     size_t n = toy_prod_gesture_report(
         &gesture, now_ms, toy_shell_screen(&shell) == TOY_SHELL_RUNNING,
         present, px, py, out, 6u);
-    for (size_t i = 0; i < n; i++)
-        prod_dispatch(&out[i]);
+    for (size_t i = 0; i < n; i++) {
+        const toy_event_t *ev = &out[i];
+        uint8_t pre_screen = toy_shell_screen(&shell);
+        uint32_t act = prod_dispatch(ev);
+        if (ev->type == TOY_EV_POINTER_DOWN &&
+            ev->id < TOY_PROD_MAX_CONTACTS) {
+            dbg_raw_x[ev->id] = px[ev->id];
+            dbg_raw_y[ev->id] = py[ev->id];
+            prod_touchdbg("real", ev, px[ev->id], py[ev->id],
+                          pre_screen, act);
+            (void)toy_prod_tap_launch_note_down(
+                &tap_launch, now_ms, pre_screen == TOY_SHELL_GALLERY,
+                (act & TOY_SH_ACT_START_CART) != 0, shell.scroll,
+                shell.cart_count, shell.selected, ev);
+        } else if (ev->type == TOY_EV_POINTER_MOVE) {
+            toy_prod_tap_launch_note_move(&tap_launch, ev);
+        } else if (ev->type == TOY_EV_POINTER_UP &&
+                   ev->id < TOY_PROD_MAX_CONTACTS) {
+            toy_event_t synth;
+            if (toy_prod_tap_launch_take_up(
+                    &tap_launch, now_ms,
+                    toy_shell_screen(&shell) == TOY_SHELL_GALLERY,
+                    shell.scroll, shell.cart_count, shell.selected,
+                    ev, &synth)) {
+                uint8_t synth_screen = toy_shell_screen(&shell);
+                uint32_t synth_act = prod_dispatch(&synth);
+                prod_touchdbg("synth-tap", &synth, dbg_raw_x[ev->id],
+                              dbg_raw_y[ev->id], synth_screen,
+                              synth_act);
+            }
+        }
+    }
 }
 
 static void prod_gesture_poll(uint64_t now_ms)
@@ -551,8 +649,17 @@ static void boot_touch(void)
         return;
     }
     touch_ok = true;
+    /* Latch INT edges from here on (pin already configured
+     * input+pull-up by cst9217_reset). Clearing the latch
+     * before enabling drops any boot transient; real edges
+     * after this point are the owner's. */
+    touch_irq_pending = false;
+    touch_irq_edges = 0;
+    gpio_set_irq_enabled_with_callback(PIN_TOUCH_INT,
+                                       GPIO_IRQ_EDGE_FALL, true,
+                                       &prod_touch_irq);
     printf("TOY-PROD-TOUCH ok chip=0x%04x res=%ux%u mirror=%d "
-           "int_gpio=%u rst_gpio=%u\n",
+           "int_gpio=%u rst_gpio=%u irq=edge-fall-latched\n",
            info.chip_type, info.resolution_x, info.resolution_y,
            TOY_PROD_TOUCH_MIRROR, PIN_TOUCH_INT, PIN_TOUCH_RST);
 }
@@ -661,6 +768,7 @@ int main(void)
     boot_imu_and_calibrate();
 
     toy_prod_gesture_init(&gesture);
+    toy_prod_tap_launch_init(&tap_launch);
     toy_prod_tilt_gate_init(&tilt_gate);
     toy_queue_clear(&prod_live_queue);
     toy_shell_init(&shell, toy_carts, toy_cart_count);

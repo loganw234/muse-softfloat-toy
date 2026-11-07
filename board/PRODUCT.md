@@ -15,7 +15,7 @@ signal seam is the next parcel.
 | `product_input.h` | Pure seams: touch mapping, gesture machine, tilt gate, dial accumulator, still calibration |
 | `clock_rtc.{c,h}` | `toy_clock.h` over the PCF85063 (toy_product only; `toy_board` keeps `clock_board.c`) |
 | `clock_civil.h` | Pure civil <-> epoch conversions, clock-commit combiner, tz RAM-byte encoding |
-| `../tools/product_input_test.c` | Host test for both pure headers (97 checks) |
+| `../tools/product_input_test.c` | Host test for both pure headers (142 checks) |
 
 ## Boot sequence
 
@@ -47,7 +47,18 @@ a running cart sees only what the shell forwards.
   Controller coordinates are mirrored on both axes
   (`465 - v`, the vendor display mapping) before conversion
   to milli-radius coords. Up to two contacts, tracked per
-  finger.
+  finger. The touch INT line is latched by a falling-edge
+  IRQ, so a short tap that starts and ends during one
+  frame's render+flush still triggers a report read on the
+  next frame instead of being missed between level polls.
+- **Gallery tap-to-launch** — on glass, **one tap on a cart
+  row launches it** (the runner confirms the selecting tap
+  when the finger lifts; taps longer than ~0.5 s or drags
+  only select). This is glass/runner behaviour only: the
+  keyboard/host flow stays select + Enter, the `RUN >`
+  footer still launches the selected cart, and the
+  SET CLOCK / CLOCK FACE rows and all other screens are
+  unchanged (settings keeps its select-then-adjust taps).
 - **Tilt** — tipping the board sends milli-g tilt (≥20 mg
   change, at most every 33 ms) in display space.
 - **Dial** — rotating the whole device in its plane sends
@@ -73,7 +84,7 @@ Per screen:
 
 | Screen | Tap | Dial (rotate) | Long-press | Notes |
 |---|---|---|---|---|
-| GALLERY | tap a row to select; tap the selected row (or `RUN >` footer) to launch; `SET >` footer opens settings; last two rows are SET CLOCK / CLOCK FACE | move selection | to CLOCK FACE | idles into CLOCK FACE after 1800 quiet frames (frame-counted, ~2 min at glass frame rates; handling the board counts as activity) |
+| GALLERY | **single tap on a cart row launches it**; `RUN >` footer also launches the selected cart; `SET >` footer opens settings; last two rows are SET CLOCK / CLOCK FACE (tap once to select, again to open — tap-to-launch covers cart rows only) | move selection | to CLOCK FACE | idles into CLOCK FACE after 1800 quiet frames (frame-counted, ~2 min at glass frame rates; handling the board counts as activity) |
 | RUNNING (cart) | the cart's own pointer input | the cart's DIAL input (pond size, julia, synspec, …) | exit to GALLERY | tilt feeds TILT carts (gravity, pond, shepherd); two-finger tap opens SETTINGS and pauses the sim |
 | SETTINGS | tap a row to select; tap the selected row's left/right third to −/+; tap footer to run/resume | adjust selected value | back (to the cart if it was running, else GALLERY) | `*` = staged for next (re)start; live values apply at the next step when resumed |
 | CLOCK SET | tap the HH / MM / UTC-offset zone to pick the field; tap the SET zone to commit; tap the bottom zone to cancel | adjust the picked field (tz in 15-min steps) | cancel | only hh:mm + offset are edited; the date stays whatever the RTC already holds (see clock below) |
@@ -106,7 +117,8 @@ Per screen:
 | `TOY-PROD-BOOT / -PRESENTER / -MEM` | banner, fb mode, linked-layout memory evidence |
 | `TOY-PROD-INIT rc=` | panel init result |
 | `TOY-PROD-RTC ok valid=… tz=… tz_src=…` | wall clock state at boot (`-RTC-ERR` if the chip is unreachable) |
-| `TOY-PROD-TOUCH ok chip=… mirror=1` | touch up (`-TOUCH-ERR rc=` otherwise; runtime read errors reprint at counts 1, 100, …) |
+| `TOY-PROD-TOUCH ok chip=… mirror=1 … irq=edge-fall-latched` | touch up, INT edges latched by IRQ (`-TOUCH-ERR rc=` otherwise; runtime read errors reprint at counts 1, 100, …) |
+| `TOY-PROD-TOUCHDBG src=real\|synth-tap id=… raw=(x,y) glass=(x,y) milli=(x,y) screen=… act=0x… mirror=… irq_edges=…` | one line per touch DOWN acted on (never MOVE/UP): `raw` = controller coords, `glass` = after the mirror define, `milli` = what the shell received, `act` = shell action mask (`0x11` = start cart). `src=synth-tap` is the runner's tap-to-launch confirm. Touch a known corner: if `milli` names the opposite corner from your finger, the mirror define is wrong; `irq_edges` growing with no matching DOWN line means reports still die before the drain read |
 | `TOY-PROD-IMU ok …` / `TOY-PROD-CAL ok bias_mdps=…` or `skipped` | IMU up; dial zero accepted or declined |
 | `TOY-PROD-SHELL carts=… touch=… imu=…` | shell live, which senses survived |
 | `TOY-PROD-EVENT screen=<name> cart=<name>` | every screen change |
@@ -129,14 +141,19 @@ prints (that is the calibration second).
    counter-clockwise walks it back up. *(Dial direction
    check — if reversed, the fix is `TOY_PROD_DIAL_SIGN` in
    `product_input.h`.)*
-2. **Launch fig8.** Tap the FIG8 row twice (select, then
-   launch), or tap `RUN >`. Expect
-   `TOY-PROD-EVENT start cart=fig8` and 1 Hz PACE lines.
-   Drag a finger slowly across the glass: note whether the
-   motion reads mirrored on either axis against where your
-   finger is. *(Touch mirror check, still owed from the
-   sensors parcel — if drags run backwards, the fix is
-   `TOY_PROD_TOUCH_MIRROR 0`.)*
+2. **Launch a cart with ONE tap.** Tap any cart row that
+   is not already selected, once. Expect two
+   `TOY-PROD-TOUCHDBG` lines (`src=real … act=0x0` — the
+   tap selected the row — then `src=synth-tap … act=0x11`
+   — the runner's confirm launched it), then
+   `TOY-PROD-EVENT start cart=<name>` and 1 Hz PACE lines.
+   (Tapping the already-selected row launches directly on
+   the real DOWN: one line, `act=0x11`, no synth.) Before launching, also tap each glass corner
+   once and keep the serial log: each corner tap's
+   `TOUCHDBG milli=` should name that same corner
+   (top-left ≈ (−1000,−1000)). *(Touch mirror check — if
+   milli names the opposite corner, or drags in a cart run
+   backwards, the fix is `TOY_PROD_TOUCH_MIRROR 0`.)*
 3. **Tilt.** Exit (next step), launch **gravity**, and tip
    the right edge down: bodies should slosh toward the
    right and the teal spoke should point right-down-ish.

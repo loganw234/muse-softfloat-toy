@@ -547,4 +547,187 @@ static inline bool toy_prod_cal_finish(const toy_prod_cal_t *c,
     return true;
 }
 
+/* --- IRQ-latched touch pending merge (touchfix2) --------------
+ *
+ * The CST9217 vendor flow is one report per INT falling edge
+ * (board/touch_cst9217.h: Waveshare registers GPIO_IRQ_EDGE_FALL;
+ * board/SENSORS.md). No sourced driver states INT stays low
+ * until the report is read, so the product runner must not
+ * level-sample it once per ~55 ms frame: a pulse that rises
+ * again during render+flush would leave cst9217_should_read
+ * with nothing but the 1 Hz probe. main_product.c therefore
+ * latches every falling edge in an IRQ (flag + edge count,
+ * nothing else in IRQ context) and merges it with the live
+ * level here; the merged value is the int_pending input to
+ * the untouched cst9217_should_read drain policy (pending OR
+ * contact-tracked OR probe-due). The gesture tracker above
+ * stays pure and unchanged: the IRQ only replaces the
+ * level-poll's fall detection.
+ */
+static inline bool toy_prod_touch_pending_merge(bool irq_latched,
+                                                bool int_low_now)
+{
+    return irq_latched || int_low_now;
+}
+
+/* --- gallery single-tap launch (touchfix2, runner-side) --------
+ *
+ * On glass the shell's pointer rule is select-then-tap-again
+ * (core/toy_shell.c shell_gallery_event: a POINTER_DOWN on an
+ * unselected gallery row only selects it; a DOWN on the
+ * selected row activates). With taps delivered at frame rate
+ * that made launching a two-lottery-tap sequence, so the
+ * product runner (never the shell: keyboard/emu flow stays
+ * select+enter, and core/ is untouched) confirms a real
+ * gallery tap: when a DOWN in the cart rows selected a row
+ * without TOY_SH_ACT_START_CART, the matching short, still UP
+ * feeds ONE synthesised POINTER_DOWN at the DOWN coords,
+ * which the shell then sees as a tap on the selected row.
+ * GALLERY cart rows only: footer (RUN/SET), the SET CLOCK /
+ * CLOCK FACE virtual rows, every other screen, an
+ * already-launching DOWN, a >TOY_PROD_TAP_MAX_MS press, and
+ * a press that strayed >TOY_PROD_TAP_TOL_MILLI from its DOWN
+ * point (a drag) never synthesise.
+ *
+ * Row math replicates shell_gallery_event exactly (private
+ * ML_* constants in core/toy_shell.c, milli-radius):
+ * rows start at y=-620, height 155, TOY_SHELL_VISIBLE_ROWS=6
+ * on glass, footer at y>=740.
+ */
+#define TOY_PROD_GALLERY_ROW_Y (-620)
+#define TOY_PROD_GALLERY_ROW_H 155
+#define TOY_PROD_GALLERY_VISIBLE_ROWS 6
+#define TOY_PROD_GALLERY_FOOTER_Y 740
+#define TOY_PROD_TAP_MAX_MS 500u
+#define TOY_PROD_TAP_TOL_MILLI 80 /* ~19 glass px from DOWN point */
+
+/* Gallery row under milli y, or -1 outside the row band
+ * (title, detail gap and footer all return -1). total_rows
+ * is cart_count + 2 (the two virtual rows), as in the shell. */
+static inline int32_t toy_prod_gallery_row_at(int32_t milli_y,
+                                              int32_t scroll,
+                                              int32_t total_rows)
+{
+    if (milli_y < TOY_PROD_GALLERY_ROW_Y ||
+        milli_y >= TOY_PROD_GALLERY_ROW_Y +
+                       TOY_PROD_GALLERY_VISIBLE_ROWS *
+                           TOY_PROD_GALLERY_ROW_H)
+        return -1;
+    int32_t row = scroll +
+                  (milli_y - TOY_PROD_GALLERY_ROW_Y) /
+                      TOY_PROD_GALLERY_ROW_H;
+    return (row >= 0 && row < total_rows) ? row : -1;
+}
+
+typedef struct {
+    bool armed;
+    int32_t row;
+    int32_t down_x; /* milli */
+    int32_t down_y;
+    uint64_t down_ms;
+} toy_prod_tap_slot_t;
+
+typedef struct {
+    toy_prod_tap_slot_t slot[TOY_PROD_MAX_CONTACTS];
+} toy_prod_tap_launch_t;
+
+static inline void toy_prod_tap_launch_init(toy_prod_tap_launch_t *t)
+{
+    for (unsigned i = 0; i < TOY_PROD_MAX_CONTACTS; i++) {
+        t->slot[i].armed = false;
+        t->slot[i].row = -1;
+        t->slot[i].down_x = 0;
+        t->slot[i].down_y = 0;
+        t->slot[i].down_ms = 0;
+    }
+}
+
+static inline bool toy_prod_tap_still(int32_t x0, int32_t y0, int32_t x1,
+                                      int32_t y1)
+{
+    int64_t dx = (int64_t)x1 - x0;
+    int64_t dy = (int64_t)y1 - y0;
+    return dx * dx + dy * dy <=
+           (int64_t)TOY_PROD_TAP_TOL_MILLI * TOY_PROD_TAP_TOL_MILLI;
+}
+
+/* Call after a real POINTER_DOWN has been through the shell.
+ * selected_after is the shell's gallery selection once the
+ * DOWN landed; already_started is (act & START_CART). Arms
+ * only when the DOWN selected a cart row without launching. */
+static inline bool toy_prod_tap_launch_note_down(
+    toy_prod_tap_launch_t *t, uint64_t now_ms, bool in_gallery,
+    bool already_started, int32_t scroll, int32_t cart_count,
+    int32_t selected_after, const toy_event_t *down)
+{
+    if (!down || down->type != TOY_EV_POINTER_DOWN ||
+        down->id >= TOY_PROD_MAX_CONTACTS)
+        return false;
+    toy_prod_tap_slot_t *s = &t->slot[down->id];
+    s->armed = false;
+    if (!in_gallery || already_started)
+        return false;
+    int32_t row = toy_prod_gallery_row_at(down->y, scroll,
+                                          cart_count + 2);
+    if (row < 0 || row >= cart_count || row != selected_after)
+        return false;
+    s->armed = true;
+    s->row = row;
+    s->down_x = down->x;
+    s->down_y = down->y;
+    s->down_ms = now_ms;
+    return true;
+}
+
+/* A MOVE that strays past the tap tolerance is a drag:
+ * disarm for good (same discipline as the long-press). */
+static inline void toy_prod_tap_launch_note_move(
+    toy_prod_tap_launch_t *t, const toy_event_t *move)
+{
+    if (!move || move->type != TOY_EV_POINTER_MOVE ||
+        move->id >= TOY_PROD_MAX_CONTACTS)
+        return;
+    toy_prod_tap_slot_t *s = &t->slot[move->id];
+    if (s->armed &&
+        !toy_prod_tap_still(s->down_x, s->down_y, move->x, move->y))
+        s->armed = false;
+}
+
+/* Call on the matching real POINTER_UP (after it has been
+ * through the shell). True + *synth filled (POINTER_DOWN at
+ * the original DOWN milli coords) iff this press was a short
+ * still tap on the still-selected cart row in GALLERY. The
+ * slot is consumed either way: one tap, at most one synth. */
+static inline bool toy_prod_tap_launch_take_up(
+    toy_prod_tap_launch_t *t, uint64_t now_ms, bool in_gallery,
+    int32_t scroll, int32_t cart_count, int32_t selected_now,
+    const toy_event_t *up, toy_event_t *synth)
+{
+    if (!up || up->type != TOY_EV_POINTER_UP ||
+        up->id >= TOY_PROD_MAX_CONTACTS || !synth)
+        return false;
+    toy_prod_tap_slot_t *s = &t->slot[up->id];
+    if (!s->armed)
+        return false;
+    toy_prod_tap_slot_t was = *s;
+    s->armed = false;
+    if (!in_gallery || selected_now != was.row)
+        return false;
+    if (now_ms < was.down_ms ||
+        now_ms - was.down_ms > TOY_PROD_TAP_MAX_MS)
+        return false;
+    if (!toy_prod_tap_still(was.down_x, was.down_y, up->x, up->y))
+        return false;
+    if (toy_prod_gallery_row_at(up->y, scroll, cart_count + 2) !=
+        was.row)
+        return false;
+    toy_event_t e = { 0 };
+    e.type = TOY_EV_POINTER_DOWN;
+    e.id = up->id;
+    e.x = was.down_x;
+    e.y = was.down_y;
+    *synth = e;
+    return true;
+}
+
 #endif
