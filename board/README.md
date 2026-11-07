@@ -6,6 +6,11 @@ cartridge's proof stream headless and prints state hashes over
 USB CDC. No display/touch/IMU drivers yet; those land with the
 RP2350-Touch-LCD-1.85C kit (`docs/WAVE-T2.md`).
 
+Sensor bring-up for the Waveshare RP2350-Touch-AMOLED-1.75
+(QMI8658C IMU, CST9217 touch, PCF85063A RTC drivers plus the
+standalone RP2350-only `toy_sensor_test` firmware) lives in
+[`SENSORS.md`](SENSORS.md); it is not wired into `toy_board`.
+
 ## Platform selection
 
 One knob, default = the historical RP2040 build:

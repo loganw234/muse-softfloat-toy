@@ -288,3 +288,39 @@ endif()
 pico_enable_stdio_usb(toy_board 1)
 pico_enable_stdio_uart(toy_board 0)
 pico_add_extra_outputs(toy_board)
+
+# --- toy_sensor_test (toy5-sensors parcel; RP2350 only) ----------
+# Standalone I2C sensor bring-up firmware (board/SENSORS.md):
+# QMI8658C IMU + CST9217 touch + PCF85063A RTC on the Waveshare
+# RP2350-Touch-AMOLED-1.75. No cartridges, no display. Appended
+# after toy_board so sibling parcels with their own appended
+# targets union-merge trivially. RP2040 configures exactly as
+# before (this whole block is skipped).
+if(_toy_platform_actual STREQUAL "rp2350")
+    add_executable(toy_sensor_test
+        main_sensor_test.c
+        imu_qmi8658.c
+        touch_cst9217.c
+        rtc_pcf85063.c
+    )
+    target_include_directories(toy_sensor_test PRIVATE
+        ${CMAKE_CURRENT_LIST_DIR})
+    target_compile_definitions(toy_sensor_test PRIVATE
+        TOY_GIT_HEAD="${TOY_GIT_HEAD}")
+    if(NOT TOY_BOARD_LED_PIN STREQUAL "")
+        target_compile_definitions(toy_sensor_test PRIVATE
+            TOY_BOARD_LED_PIN=${TOY_BOARD_LED_PIN})
+    endif()
+    target_compile_options(toy_sensor_test PRIVATE
+        -O2 -Wall -Wextra -Werror)
+    target_link_libraries(toy_sensor_test
+        pico_stdlib pico_unique_id hardware_i2c)
+    # Same no-hardware-float pins as toy_board (see above): the
+    # drivers are integer-only, so nothing here wants the FPU
+    # or DCP either; printf keeps libgcc software double.
+    pico_set_float_implementation(toy_sensor_test none)
+    pico_set_double_implementation(toy_sensor_test compiler)
+    pico_enable_stdio_usb(toy_sensor_test 1)
+    pico_enable_stdio_uart(toy_sensor_test 0)
+    pico_add_extra_outputs(toy_sensor_test)
+endif()
