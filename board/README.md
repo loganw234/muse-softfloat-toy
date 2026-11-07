@@ -6,6 +6,11 @@ cartridge's proof stream headless and prints state hashes over
 USB CDC. No display/touch/IMU drivers yet; those land with the
 RP2350-Touch-LCD-1.85C kit (`docs/WAVE-T2.md`).
 
+Separate from the proof: `toy_display_test` (RP2350 builds only)
+is the CO5300 panel bring-up firmware for the Waveshare
+RP2350-Touch-AMOLED-1.75 — see `board/DISPLAY.md`. It changes no
+proof behaviour and shares no cartridge code.
+
 ## Platform selection
 
 One knob, default = the historical RP2040 build:
