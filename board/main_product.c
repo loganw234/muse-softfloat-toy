@@ -27,9 +27,8 @@
  *   toy_shell_event first and act on its mask (this file's
  *   prod_dispatch mirrors emu/main_emu.c shell_do_actions);
  *   RUNNING steps the cart with the toy5-pace time-boxed
- *   stepper (feed -> apply live queue -> step, synthetic
- *   on-device signal source as before - live IMU feed is a
- *   later parcel) and renders the cart; every other screen
+ *   stepper (feed -> apply live queue -> step) and renders
+ *   the cart; every other screen
  *   renders the shell with toy_clock_now() and never steps.
  *   The presenter flushes every frame in all screens, then
  *   toy_shell_tick() runs the idle clockface.
@@ -74,6 +73,33 @@
  * in this main loop only: the GPIO22 handler touches the
  * volatile latch flag + edge counter and nothing else, so
  * transfers are single-flight by construction.
+ *
+ * Live feed (toy5-livefeed): the four IMU6 feed carts
+ * (gpend/seismo/attitude/heartbeat) start on the real
+ * QMI8658 when the IMU is up. This file is the live runner
+ * core's contract always named (toy_feed_step is
+ * proof-strict; a live runner "feeds gaps itself",
+ * core/toy_cart.h): prod_imu_poll's one read per frame -
+ * the same read tilt/dial already took, same back-off,
+ * same bus-health notes, no extra I2C - also notes the raw
+ * counts into board/live_feed.h, whose latest-sample hold
+ * fills each step's frame and whose LIVE info stamps the
+ * cart's hashed provenance through the existing
+ * toy_sig_label_feed path. On-glass the label reads LIVE;
+ * serial gets a TOY-PROD-FEED line at cart start (src=live,
+ * or src=synthetic-fallback when the IMU is down and the
+ * cart keeps its synthetic scenario) and a 1 Hz telemetry
+ * line while a live cart runs (fresh vs repeated samples,
+ * read errors, max held-sample age, achieved fresh rate vs
+ * the cart's spec rate, time-warp). On a read error the
+ * last good sample is held and counted; motion is never
+ * fabricated, and before the first good sample the cart is
+ * not stepped at all (its NO SIG rendering shows). Product
+ * never checkpoints or banks cart state (no toy_ckpt /
+ * toy_bank call exists in this file), so core's refusal to
+ * reconstruct LIVE streams is never approached. The proof
+ * firmware (main_board.c) does not include live_feed.h and
+ * stays synthetic-only.
  */
 #include <stdio.h>
 #include <string.h>
@@ -90,6 +116,7 @@
 #include "display_co5300.h"
 #include "display_qspi_pio.h"
 #include "imu_qmi8658.h"
+#include "live_feed.h"
 #include "presenter.h"
 #include "product_input.h"
 #include "rtc_pcf85063.h"
@@ -159,6 +186,16 @@ static toy_queue_t prod_live_queue;
 static toy_sig_source_t prod_sig_src;
 static int prod_sig_created;
 static int16_t prod_sig_frame[TOY_SIG_MAX_FRAME_VALUES];
+/* Live feed (toy5-livefeed): the hold is noted by every
+ * successful prod_imu_poll read, running cart or not, so a
+ * cart launched later starts from a real fresh reading.
+ * prod_feed_mode is the per-start source selection
+ * (live_feed.h); prod_live_info is built once per live
+ * start. feed_last_us anchors the 1 Hz telemetry rate. */
+static toy_live_feed_t prod_live_feed;
+static toy_sig_info_t prod_live_info;
+static int prod_feed_mode = TOY_LIVE_FEED_NONE;
+static uint64_t feed_last_us;
 
 /* PACE window (RUNNING only), reset at each cart start. */
 static uint64_t pace_mark_us, pace_sim_us, pace_render_us, pace_flush_us;
@@ -239,6 +276,7 @@ static void prod_stop_cart(const char *why)
         printf("TOY-PROD-EVENT exit cart=%s why=%s\n", run_cart->name, why);
     run_cart = NULL;
     prod_sig_created = 0;
+    prod_feed_mode = TOY_LIVE_FEED_NONE;
     toy_queue_clear(&prod_live_queue);
 }
 
@@ -258,11 +296,42 @@ static void prod_start_cart(void)
         toy_shell_enter(&shell, TOY_SHELL_GALLERY);
         return;
     }
-    int sig_created = toy_sig_proof_source_init(cart, &prod_sig_src);
-    if (sig_created < 0) {
-        printf("TOY-PROD-SIG-ERR cart=%s stage=init\n", cart->name);
-        toy_shell_enter(&shell, TOY_SHELL_GALLERY);
-        return;
+    /* Source selection (toy5-livefeed, live_feed.h): an
+     * IMU6 feed cart goes LIVE on the real QMI8658 when the
+     * IMU is up; otherwise it keeps its synthetic proof
+     * scenario, said loudly here and on glass (the cart's
+     * label renders SYNTHETIC, never a silent pretend-live).
+     * Selection is start-time only - see live_feed.h. */
+    prod_feed_mode = toy_live_feed_select(cart->feed != 0,
+                                          cart->sig_spec.device,
+                                          imu_ok ? 1 : 0);
+    int sig_created = 0;
+    if (prod_feed_mode == TOY_LIVE_FEED_LIVE) {
+        toy_live_feed_info(&cart->sig_spec, &prod_live_info);
+        toy_live_feed_reset_run(&prod_live_feed);
+        feed_last_us = time_us_64();
+        printf("TOY-PROD-FEED cart=%s src=live odr_hz=%u "
+               "spec_hz=%lu sps=%lu stream=%016llx\n",
+               cart->name, QMI8658_ODR_HZ,
+               (unsigned long)cart->sig_spec.sample_rate_hz,
+               (unsigned long)cart->sig_spec.samples_per_step,
+               (unsigned long long)prod_live_info.stream_id);
+    } else {
+        sig_created = toy_sig_proof_source_init(cart, &prod_sig_src);
+        if (sig_created < 0) {
+            printf("TOY-PROD-SIG-ERR cart=%s stage=init\n", cart->name);
+            toy_shell_enter(&shell, TOY_SHELL_GALLERY);
+            return;
+        }
+        if (prod_feed_mode == TOY_LIVE_FEED_SYNTHETIC)
+            printf("TOY-PROD-FEED cart=%s src=synthetic-fallback "
+                   "reason=%s spec_hz=%lu sps=%lu\n",
+                   cart->name,
+                   cart->sig_spec.device == TOY_SIG_DEVICE_IMU6
+                       ? "imu-down"
+                       : "no-live-device",
+                   (unsigned long)cart->sig_spec.sample_rate_hz,
+                   (unsigned long)cart->sig_spec.samples_per_step);
     }
     prod_sig_created = sig_created;
     memset(state_buf, 0, cart->state_size);
@@ -501,13 +570,21 @@ static void prod_gesture_poll(uint64_t now_ms)
 
 /* One IMU sample per frame: tilt through the 33 ms / 20 mg
  * gate, dial through the bias-corrected accumulator with
- * real dt (capped). Read errors back off and count. */
+ * real dt (capped), and (toy5-livefeed) the same reading's
+ * raw counts noted into the live-feed hold - one I2C read
+ * serves all three, so the feed inherits this cadence, the
+ * error back-off below and the shared bus-health notes
+ * exactly, and adds no transfers of its own. Read errors
+ * back off and count (the hold keeps the last good sample
+ * and counts the error too). */
 static void prod_imu_poll(uint64_t now_ms)
 {
     if (!imu_ok || now_ms < next_imu_ms)
         return;
     qmi8658_milli_t m;
-    if (qmi8658_read_milli(bus(), &m, NULL) != 0) {
+    qmi8658_raw_t raw;
+    if (qmi8658_read_milli(bus(), &m, &raw) != 0) {
+        toy_live_feed_note_error(&prod_live_feed);
         imu_err_count++;
         toy_prod_bus_note_error(&bus_health);
         if (imu_err_count == 1u || (imu_err_count % 100u) == 0u)
@@ -525,6 +602,11 @@ static void prod_imu_poll(uint64_t now_ms)
     }
     last_imu_ms = now_ms;
     have_imu_ms = true;
+    {
+        const int16_t raw6[6] = { raw.ax, raw.ay, raw.az,
+                                  raw.gx, raw.gy, raw.gz };
+        toy_live_feed_note_sample(&prod_live_feed, raw6, now_ms);
+    }
     toy_event_t ev;
     if (toy_prod_tilt_gate_poll(&tilt_gate, now_ms, m.ax_mg, m.ay_mg, &ev))
         prod_dispatch(&ev);
@@ -659,6 +741,32 @@ static int prod_step_frame(void)
     uint64_t deadline = time_us_64() + TOY_PROD_SIM_BUDGET_US;
     uint32_t steps_done = 0;
     for (uint32_t s = 0; s < cart->demo_steps_per_frame; s++) {
+        if (prod_feed_mode == TOY_LIVE_FEED_LIVE) {
+            /* Live runner path (toy5-livefeed): fill from
+             * the hold and call feed() directly - the
+             * proof-strict toy_feed_step stays synthetic-
+             * only. No good sample yet: step nothing this
+             * frame, the cart renders NO SIG; never feed
+             * fabricated counts. */
+            uint32_t flags = 0;
+            uint32_t got = toy_live_feed_fill(
+                &prod_live_feed, prod_sig_frame,
+                cart->sig_spec.samples_per_step,
+                toy_clock_mono_ms(), &flags);
+            if (got == 0)
+                break;
+            cart->feed(state_buf, prod_sig_frame, got,
+                       prod_live_info.channels, &prod_live_info,
+                       flags);
+            toy_apply_queue(cart, state_buf, &prod_live_queue,
+                            TOY_MAX_EVENTS_PER_STEP);
+            cart->step(state_buf);
+            steps_done++;
+            if (steps_done < cart->demo_steps_per_frame &&
+                time_us_64() >= deadline)
+                break;
+            continue;
+        }
         int frc = toy_feed_step(cart, state_buf,
                                 prod_sig_created ? &prod_sig_src : 0,
                                 prod_sig_frame,
@@ -696,6 +804,46 @@ static void prod_pace_account(uint64_t sim_us, uint64_t render_us,
                (unsigned long long)pace_render_us,
                (unsigned long long)pace_flush_us, pace_frames, pace_steps,
                pace_seconds);
+        if (prod_feed_mode == TOY_LIVE_FEED_LIVE) {
+            /* 1 Hz live-feed telemetry (toy5-livefeed):
+             * fresh/rep = samples fed this window that were
+             * a new reading / a hold repeat; err = IMU read
+             * errors (held, never fabricated); max_age_ms =
+             * oldest held reading actually fed; fresh_hz_x10
+             * and cons_hz_x10 are the achieved new-reading
+             * rate and total consumption rate (samples fed
+             * per wall second, x10) over this window's real
+             * elapsed time; warp_x100 = cons/spec_hz x100
+             * (100 = cart time runs at wall rate). */
+            uint64_t el = now > feed_last_us ? now - feed_last_us : 0;
+            uint64_t fresh_x10 = el ? (uint64_t)prod_live_feed.fresh_w *
+                                          10000000ull / el
+                                    : 0;
+            uint64_t cons_x10 =
+                el ? (uint64_t)(prod_live_feed.fresh_w +
+                                prod_live_feed.rep_w) *
+                         10000000ull / el
+                   : 0;
+            uint64_t warp_x100 =
+                run_cart->sig_spec.sample_rate_hz
+                    ? cons_x10 * 10ull /
+                          run_cart->sig_spec.sample_rate_hz
+                    : 0;
+            printf("TOY-PROD-FEED cart=%s src=live fresh=%lu rep=%lu "
+                   "err=%lu max_age_ms=%lu fresh_hz_x10=%llu "
+                   "cons_hz_x10=%llu spec_hz=%lu warp_x100=%llu\n",
+                   run_cart->name,
+                   (unsigned long)prod_live_feed.fresh_w,
+                   (unsigned long)prod_live_feed.rep_w,
+                   (unsigned long)prod_live_feed.err_w,
+                   (unsigned long)prod_live_feed.max_age_w,
+                   (unsigned long long)fresh_x10,
+                   (unsigned long long)cons_x10,
+                   (unsigned long)run_cart->sig_spec.sample_rate_hz,
+                   (unsigned long long)warp_x100);
+            toy_live_feed_reset_window(&prod_live_feed);
+            feed_last_us = now;
+        }
         pace_sim_us = pace_render_us = pace_flush_us = 0;
         pace_frames = 0;
         pace_steps = 0;
@@ -932,6 +1080,7 @@ int main(void)
     boot_touch();
     boot_imu_and_calibrate();
 
+    toy_live_feed_init(&prod_live_feed);
     toy_prod_bus_init(&bus_health);
     toy_prod_gesture_init(&gesture);
     toy_prod_tap_launch_init(&tap_launch);
