@@ -10,6 +10,10 @@ Separate from the proof: `toy_display_test` (RP2350 builds only)
 is the CO5300 panel bring-up firmware for the Waveshare
 RP2350-Touch-AMOLED-1.75 — see `board/DISPLAY.md`. It changes no
 proof behaviour and shares no cartridge code.
+Sensor bring-up for the Waveshare RP2350-Touch-AMOLED-1.75
+(QMI8658C IMU, CST9217 touch, PCF85063A RTC drivers plus the
+standalone RP2350-only `toy_sensor_test` firmware) lives in
+[`SENSORS.md`](SENSORS.md); it is not wired into `toy_board`.
 
 ## Platform selection
 
