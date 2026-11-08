@@ -94,12 +94,40 @@
  * the cart's spec rate, time-warp). On a read error the
  * last good sample is held and counted; motion is never
  * fabricated, and before the first good sample the cart is
- * not stepped at all (its NO SIG rendering shows). Product
- * never checkpoints or banks cart state (no toy_ckpt /
- * toy_bank call exists in this file), so core's refusal to
- * reconstruct LIVE streams is never approached. The proof
+ * not stepped at all (its NO SIG rendering shows). The proof
  * firmware (main_board.c) does not include live_feed.h and
  * stays synthetic-only.
+ *
+ * Flash checkpoints (toy5-flashprod): while a cart is
+ * RUNNING, its state is checkpointed to the internal-flash
+ * A/B slots (board/ckpt_flash.c over core/toy_ckpt_slot.h,
+ * TOYCKPT1 images) every TOY_PROD_CKPT_SECONDS of wall time
+ * and once on clean exit-to-gallery, always between frames
+ * (after the presenter flush, before the next step; the
+ * exit save runs at frame top before that frame steps).
+ * Each save serialises into a static SRAM image buffer and
+ * goes through toy_ckpt_flash_write_next, so the previous
+ * checkpoint is never the slot being erased and a power
+ * cut mid-save leaves it newest-valid. Policy - cadence,
+ * skip-live, boot-resume decision - is the pure seam in
+ * board/product_ckpt.h (tools/prod_ckpt_test.c): LIVE feed
+ * runs skip saving (a live sample position is not a
+ * function of a step count and core refuses to rebuild
+ * it; one TOY-PROD-CKPT skip-live line per run), synthetic
+ * feed runs save and resume by seeking the respawned
+ * source to step_count * samples_per_step. At boot, after
+ * shell init, the newest valid slot for a still-registered
+ * cart auto-starts that cart from the checkpoint bytes
+ * (TOY-PROD-RESUME); any validation failure or unregistered
+ * cart name lands in the gallery with a loud line. A fresh
+ * (non-resume) start erases both slots first: step_count
+ * restarts at 0 on a relaunch and is meaningless across
+ * runs/carts, so slot selection must only ever compare
+ * images of the one current run (the toy_ckpt_slot.h
+ * caveat, decided here). Single-core only, exactly as
+ * ckpt_flash.h states: PICO_FLASH_ASSUME_CORE1_SAFE, and a
+ * future core-1 product must revisit. The proof firmware
+ * gains none of this (no product_ckpt include, no calls).
  */
 #include <stdio.h>
 #include <string.h>
@@ -111,6 +139,7 @@
 #include "pico/stdio_usb.h"
 #include "pico/unique_id.h"
 
+#include "ckpt_flash.h"
 #include "clock_civil.h"
 #include "clock_rtc.h"
 #include "display_co5300.h"
@@ -118,10 +147,12 @@
 #include "imu_qmi8658.h"
 #include "live_feed.h"
 #include "presenter.h"
+#include "product_ckpt.h"
 #include "product_input.h"
 #include "rtc_pcf85063.h"
 #include "touch_cst9217.h"
 #include "toy_cart.h"
+#include "toy_ckpt.h"
 #define TOY_CLOCK_ALLOW 1
 #include "toy_clock.h"
 #define TOY_SHELL_ALLOW 1
@@ -176,12 +207,35 @@ extern char __end__, __HeapLimit;
 extern char __StackTop, __StackBottom;
 
 static _Alignas(8) unsigned char state_buf[TOY_MAX_STATE_SIZE];
+/* Flash checkpoint image buffer (toy5-flashprod): one
+ * TOYCKPT1 image at format cap (64 + 65,536 = 65,600 B;
+ * the flash slot holding it is 69,632 B of erased sectors,
+ * ckpt_flash.h). Static in SRAM because the write path
+ * programs from it while XIP is down - never heap (could
+ * be carved per-save and fragment the ~170 KB heap) and
+ * never an XIP pointer (ckpt_flash rejects those). */
+static _Alignas(8) unsigned char ckpt_buf[TOY_CKPT_MAX_IMAGE_SIZE];
 static toy_presenter_t presenter;
 static co5300_t panel;
 static toy_shell_t shell;
 
 /* Running cart (shell's RUNNING screen), or NULL. */
 static const toy_cart_t *run_cart;
+/* Steps since reset (or since the resumed checkpoint's
+ * reset) for the running cart: the checkpoint header's
+ * step_count and, for synthetic feed carts, the seek base
+ * that respawns the sample source (product_ckpt.h). */
+static uint64_t run_step_count;
+static toy_prod_ckpt_timer_t ckpt_timer;
+static int ckpt_skip_live_noted;
+/* Boot-resume stash: set by prod_ckpt_try_resume() after
+ * the image is loaded into state_buf and any synthetic
+ * feed source is built + seeked; consumed by the
+ * START_CART its synthetic ENTER produces. */
+static int ckpt_resume_pending;
+static const toy_cart_t *ckpt_resume_cart;
+static uint32_t ckpt_resume_slot;
+static uint64_t ckpt_resume_step;
 static toy_queue_t prod_live_queue;
 static toy_sig_source_t prod_sig_src;
 static int prod_sig_created;
@@ -270,14 +324,163 @@ static void note_screen(void)
 
 /* --- cart lifecycle (mirrors emu shell_do_actions) -------------- */
 
+/* One flash checkpoint of the running cart (toy5-flashprod).
+ * Callers place this strictly between frames: the cadence
+ * call sits after the presenter flush, the exit call at
+ * frame top before anything steps. Serialise in SRAM, then
+ * toy_ckpt_flash_write_next erases+programs the slot that
+ * is NOT the newest valid one and read-back verifies, so a
+ * power cut at any point leaves the previous checkpoint
+ * selectable (product_ckpt.h / ckpt_flash.h).
+ *
+ * Interrupt audit for the XIP stall: no extra masking is
+ * needed here, and none is done. The erase/program callback
+ * runs inside flash_safe_execute, whose SDK default helper
+ * (pico_flash flash.c, default_enter_safe_zone_timeout_ms)
+ * save_and_disable_interrupts() on THIS core for the
+ * callback's whole duration and restores after; with
+ * PICO_FLASH_ASSUME_CORE1_SAFE=1 on core 0 that IRQ-only
+ * path is the whole protocol (core 1 never runs). The
+ * touch GPIO22 handler (prod_touch_irq) is an ordinary
+ * flash-resident function - it must never execute while
+ * XIP is down, and under the global mask it cannot: a
+ * falling edge during the stall only latches the NVIC
+ * pending bit (and the GPIO bank's edge state), delivered
+ * as one IRQ after restore, which this runner's
+ * latch-merged drain already treats as one report. Same
+ * for the USB IRQ. Nothing else in the product takes
+ * interrupts or runs DMA between frames (display QSPI PIO
+ * is polled inside flush; I2C is polled), so the callback
+ * window is the only flash-down window and it is masked.
+ * A failed save is loud, non-fatal, and re-spaces the next
+ * attempt by a full interval (timer note in every path). */
+static void prod_ckpt_save(const char *why)
+{
+    if (!run_cart)
+        return;
+    if (toy_prod_ckpt_save_decision(prod_feed_mode) ==
+        TOY_PROD_CKPT_SKIP_LIVE) {
+        if (!ckpt_skip_live_noted) {
+            printf("TOY-PROD-CKPT skip-live cart=%s why=%s "
+                   "(LIVE feed: sample position not "
+                   "reconstructible from a step count)\n",
+                   run_cart->name, why);
+            ckpt_skip_live_noted = 1;
+        }
+        toy_prod_ckpt_note(&ckpt_timer, toy_clock_mono_ms());
+        return;
+    }
+    size_t len = 0;
+    toy_ckpt_err_t serr = toy_ckpt_serialize(run_cart, state_buf,
+                                             run_step_count, ckpt_buf,
+                                             sizeof ckpt_buf, &len);
+    if (serr != TOY_CKPT_OK) {
+        printf("TOY-PROD-CKPT-ERR cart=%s step=%llu "
+               "stage=serialize err=%d (%s) why=%s\n",
+               run_cart->name, (unsigned long long)run_step_count,
+               (int)serr, toy_ckpt_strerror(serr), why);
+        toy_prod_ckpt_note(&ckpt_timer, toy_clock_mono_ms());
+        return;
+    }
+    uint32_t slot = 0;
+    uint64_t t0 = time_us_64();
+    toy_ckpt_flash_err_t ferr =
+        toy_ckpt_flash_write_next(ckpt_buf, len, &slot);
+    uint64_t ms = (time_us_64() - t0) / 1000ull;
+    toy_prod_ckpt_note(&ckpt_timer, toy_clock_mono_ms());
+    if (ferr != TOY_CKPT_FLASH_OK) {
+        printf("TOY-PROD-CKPT-ERR cart=%s step=%llu stage=write "
+               "err=%d safe_rc=%d ms=%llu why=%s\n",
+               run_cart->name, (unsigned long long)run_step_count,
+               (int)ferr, toy_ckpt_flash_last_safe_rc(),
+               (unsigned long long)ms, why);
+        return;
+    }
+    printf("TOY-PROD-CKPT saved cart=%s step=%llu slot=%lu "
+           "bytes=%lu ms=%llu why=%s\n",
+           run_cart->name, (unsigned long long)run_step_count,
+           (unsigned long)slot, (unsigned long)len,
+           (unsigned long long)ms, why);
+}
+
+/* Fresh start: retire the previous run's checkpoints.
+ * step_count restarts at 0 here, and slot selection orders
+ * by step_count, so leaving the old run's images in place
+ * would let a stale high-count image outrank this run's
+ * saves - and its slot would pin the rotation (the
+ * toy_ckpt_slot.h caveat). Erasing both slots once per
+ * human launch keeps every scan single-run; the cost is
+ * one erase of 34 sectors at a moment the owner just
+ * tapped (wear accounting in board/PRODUCT.md). Resume
+ * starts never come through here. */
+static void prod_ckpt_clear_fresh(const char *cart_name)
+{
+    uint64_t t0 = time_us_64();
+    toy_ckpt_flash_err_t err = toy_ckpt_flash_erase_all();
+    uint64_t ms = (time_us_64() - t0) / 1000ull;
+    if (err != TOY_CKPT_FLASH_OK)
+        printf("TOY-PROD-CKPT-ERR cart=%s stage=clear err=%d "
+               "safe_rc=%d ms=%llu why=fresh-start (continuing; "
+               "a stale resume image may survive)\n",
+               cart_name, (int)err, toy_ckpt_flash_last_safe_rc(),
+               (unsigned long long)ms);
+    else
+        printf("TOY-PROD-CKPT cleared cart=%s ms=%llu "
+               "why=fresh-start\n",
+               cart_name, (unsigned long long)ms);
+}
+
 static void prod_stop_cart(const char *why)
 {
     if (run_cart)
         printf("TOY-PROD-EVENT exit cart=%s why=%s\n", run_cart->name, why);
     run_cart = NULL;
+    run_step_count = 0;
+    toy_prod_ckpt_disarm(&ckpt_timer);
     prod_sig_created = 0;
     prod_feed_mode = TOY_LIVE_FEED_NONE;
     toy_queue_clear(&prod_live_queue);
+}
+
+/* Resume start (toy5-flashprod): prod_ckpt_try_resume()
+ * already loaded the checkpoint bytes into state_buf,
+ * built + seeked any synthetic feed source, and set
+ * prod_feed_mode / prod_sig_created. State bytes are the
+ * state - no reset(), no proof step-0, no shell param
+ * drain: parameters ride inside the state where carts
+ * keep them, exactly as the emu loader treats them. */
+static void prod_start_resumed(const toy_cart_t *cart)
+{
+    ckpt_resume_pending = 0;
+    run_cart = cart;
+    run_step_count = ckpt_resume_step;
+    toy_queue_clear(&prod_live_queue);
+    toy_fb_clear(toy_presenter_fb(&presenter), 0x0000u);
+    pace_mark_us = time_us_64() + 1000000ull;
+    pace_sim_us = pace_render_us = pace_flush_us = 0;
+    pace_frames = pace_steps = pace_seconds = 0;
+    ckpt_skip_live_noted = 0;
+    toy_prod_ckpt_arm(&ckpt_timer, toy_clock_mono_ms());
+    printf("TOY-PROD-RESUME cart=%s step=%llu slot=%lu\n", cart->name,
+           (unsigned long long)ckpt_resume_step,
+           (unsigned long)ckpt_resume_slot);
+    if (cart->feed)
+        printf("TOY-PROD-FEED cart=%s src=synthetic-resume step=%llu "
+               "seek_samples=%llu spec_hz=%lu sps=%lu\n",
+               cart->name, (unsigned long long)ckpt_resume_step,
+               (unsigned long long)ckpt_resume_step *
+                   cart->sig_spec.samples_per_step,
+               (unsigned long)cart->sig_spec.sample_rate_hz,
+               (unsigned long)cart->sig_spec.samples_per_step);
+    printf("TOY-PROD-EVENT start cart=%s resumed=1 hash=%016llx\n",
+           cart->name,
+           (unsigned long long)toy_hash_state(state_buf,
+                                              cart->state_size));
+    printf("TOY-PROD-CART cart=%s title=%s steps_per_frame=%lu "
+           "sim_budget_us=%lu\n",
+           cart->name, cart->title,
+           (unsigned long)cart->demo_steps_per_frame,
+           (unsigned long)TOY_PROD_SIM_BUDGET_US);
 }
 
 static void prod_start_cart(void)
@@ -288,6 +491,11 @@ static void prod_start_cart(void)
         toy_shell_enter(&shell, TOY_SHELL_GALLERY);
         return;
     }
+    if (ckpt_resume_pending && cart == ckpt_resume_cart) {
+        prod_start_resumed(cart);
+        return;
+    }
+    ckpt_resume_pending = 0; /* any other start drops the stash */
     if (cart->state_size > sizeof state_buf || !cart->render ||
         cart->demo_steps_per_frame == 0 || toy_cart_check_input(cart) ||
         toy_cart_check_signal(cart)) {
@@ -334,6 +542,13 @@ static void prod_start_cart(void)
                    (unsigned long)cart->sig_spec.samples_per_step);
     }
     prod_sig_created = sig_created;
+    /* Fresh run (toy5-flashprod): retire the previous run's
+     * checkpoints before this one's step 0, and arm the
+     * cadence from the start moment. */
+    prod_ckpt_clear_fresh(cart->name);
+    run_step_count = 0;
+    ckpt_skip_live_noted = 0;
+    toy_prod_ckpt_arm(&ckpt_timer, toy_clock_mono_ms());
     memset(state_buf, 0, cart->state_size);
     run_cart = cart;
     toy_queue_clear(&prod_live_queue);
@@ -413,14 +628,179 @@ static uint32_t prod_dispatch(const toy_event_t *ev)
         }
         printf("TOY-PROD-EVENT params-queued n=%u\n", n);
     }
-    if (act & TOY_SH_ACT_EXIT_TO_GALLERY)
+    if (act & TOY_SH_ACT_EXIT_TO_GALLERY) {
+        /* Clean exit (toy5-flashprod): one final checkpoint
+         * while run_cart + state are still live. Runs at
+         * frame top, after last frame's flush and before
+         * this frame steps - between frames, like cadence. */
+        prod_ckpt_save("exit");
         prod_stop_cart("shell-exit");
+    }
     if (act & TOY_SH_ACT_CLOCK_COMMIT)
         prod_clock_commit();
     if (act & TOY_SH_ACT_FORWARD_TO_CART)
         toy_queue_push(&prod_live_queue, ev);
     note_screen();
     return act;
+}
+
+/* Boot resume (toy5-flashprod), once after shell init:
+ * scan both flash slots, decide over the live registry
+ * (product_ckpt.h), and - only after every failure-prone
+ * step has succeeded - launch the resumed cart by driving
+ * the shell through its own event API (DOWN to the cart's
+ * gallery row, then ENTER), so focus/param defaults/
+ * running_valid come from the shell's start path, never
+ * from runner field-pokes. The START_CART that ENTER
+ * produces finds the resume stash in prod_start_cart and
+ * adopts the pre-loaded state instead of resetting.
+ * Failure anywhere leaves the shell in GALLERY untouched:
+ * read_slot re-validates, toy_ckpt_load re-validates again
+ * and leaves state_buf untouched on error, and the feed
+ * source is built + seeked before the load. */
+static void prod_ckpt_try_resume(void)
+{
+    const toy_ckpt_slot_layout_t *layout = toy_ckpt_flash_layout();
+    if (!layout) {
+        printf("TOY-PROD-RESUME-ERR layout (gallery)\n");
+        return;
+    }
+    printf("TOY-PROD-CKPT layout slots=%lu slot_bytes=%lu "
+           "base=0x%lx flash_bytes=%lu cadence_s=%lu\n",
+           (unsigned long)layout->slot_count,
+           (unsigned long)layout->slot_bytes,
+           (unsigned long)layout->base_offset,
+           (unsigned long)layout->flash_bytes,
+           (unsigned long)TOY_PROD_CKPT_SECONDS);
+    toy_prod_ckpt_slot_view_t views[TOY_CKPT_SLOT_MAX_COUNT];
+    memset(views, 0, sizeof views);
+    for (uint32_t i = 0; i < layout->slot_count; i++) {
+        const unsigned char *xip = toy_ckpt_flash_slot_xip(i);
+        if (!xip)
+            continue;
+        toy_ckpt_info_t info;
+        if (toy_ckpt_parse_header(xip, layout->slot_bytes, &info) ==
+            TOY_CKPT_OK) {
+            views[i].header_ok = 1;
+            memcpy(views[i].cart_name, info.cart_name,
+                   sizeof views[i].cart_name);
+            views[i].step_count = info.step_count;
+        }
+        toy_ckpt_slot_candidate_t cand;
+        views[i].valid =
+            toy_ckpt_slot_probe(xip, layout->slot_bytes, NULL, &cand,
+                                NULL) == TOY_CKPT_OK;
+    }
+    toy_prod_ckpt_resume_t dec;
+    toy_prod_ckpt_resume_decide(views, layout->slot_count, toy_carts,
+                                toy_cart_count, &dec);
+    if (dec.action == TOY_PROD_RESUME_NONE) {
+        printf("TOY-PROD-RESUME none (gallery)\n");
+        return;
+    }
+    if (dec.action == TOY_PROD_RESUME_UNKNOWN_CART) {
+        printf("TOY-PROD-RESUME-ERR cart=%s slot=%d "
+               "not-in-registry (gallery)\n",
+               views[dec.slot].cart_name, dec.slot);
+        return;
+    }
+    if (dec.action != TOY_PROD_RESUME_CART) {
+        printf("TOY-PROD-RESUME-ERR no-valid-checkpoint (gallery)\n");
+        return;
+    }
+    const toy_cart_t *cart = toy_carts[dec.cart_index];
+    uint32_t slot = (uint32_t)dec.slot;
+    if (cart->state_size > sizeof state_buf || !cart->render ||
+        cart->demo_steps_per_frame == 0 || toy_cart_check_input(cart) ||
+        toy_cart_check_signal(cart)) {
+        printf("TOY-PROD-RESUME-ERR cart=%s bad-cart (gallery)\n",
+               cart->name);
+        return;
+    }
+    size_t len = 0;
+    toy_ckpt_info_t info;
+    toy_ckpt_flash_err_t ferr = toy_ckpt_flash_read_slot(
+        slot, cart, ckpt_buf, sizeof ckpt_buf, &len, &info);
+    if (ferr != TOY_CKPT_FLASH_OK) {
+        printf("TOY-PROD-RESUME-ERR cart=%s slot=%lu stage=read "
+               "err=%d (gallery)\n",
+               cart->name, (unsigned long)slot, (int)ferr);
+        return;
+    }
+    /* Synthetic feed: respawn + seek BEFORE adopting the
+     * state. The resumed run stays on the synthetic source
+     * for its whole life (the checkpoint's provenance),
+     * whatever the IMU is doing this boot. */
+    int sig_created = 0;
+    int mode = TOY_LIVE_FEED_NONE;
+    if (cart->feed) {
+        if (cart->sig_spec.proof_kind != TOY_SIG_KIND_SYNTHETIC) {
+            printf("TOY-PROD-RESUME-ERR cart=%s stage=feed-kind "
+                   "(gallery)\n", cart->name);
+            return;
+        }
+        sig_created = toy_sig_proof_source_init(cart, &prod_sig_src);
+        if (sig_created != 1) {
+            printf("TOY-PROD-RESUME-ERR cart=%s stage=sig-init "
+                   "(gallery)\n", cart->name);
+            return;
+        }
+        if (cart->sig_spec.samples_per_step != 0u &&
+            info.step_count >
+                UINT64_MAX / cart->sig_spec.samples_per_step) {
+            printf("TOY-PROD-RESUME-ERR cart=%s stage=seek-range "
+                   "(gallery)\n", cart->name);
+            return;
+        }
+        uint64_t pos = info.step_count *
+                       (uint64_t)cart->sig_spec.samples_per_step;
+        if (toy_sig_seek_samples(&prod_sig_src, pos) != 0) {
+            printf("TOY-PROD-RESUME-ERR cart=%s stage=seek "
+                   "samples=%llu (gallery)\n",
+                   cart->name, (unsigned long long)pos);
+            return;
+        }
+        mode = TOY_LIVE_FEED_SYNTHETIC;
+    }
+    const toy_cart_t *loaded = NULL;
+    uint64_t loaded_step = 0;
+    toy_ckpt_err_t lerr = toy_ckpt_load(ckpt_buf, len, cart, state_buf,
+                                        sizeof state_buf, &loaded,
+                                        &loaded_step);
+    if (lerr != TOY_CKPT_OK || loaded != cart ||
+        loaded_step != info.step_count) {
+        printf("TOY-PROD-RESUME-ERR cart=%s slot=%lu stage=load "
+               "err=%d (%s) (gallery)\n",
+               cart->name, (unsigned long)slot, (int)lerr,
+               toy_ckpt_strerror(lerr));
+        return;
+    }
+    prod_feed_mode = mode;
+    prod_sig_created = sig_created;
+    ckpt_resume_cart = cart;
+    ckpt_resume_slot = slot;
+    ckpt_resume_step = loaded_step;
+    ckpt_resume_pending = 1;
+    toy_event_t ev;
+    memset(&ev, 0, sizeof ev);
+    ev.type = TOY_EV_KEY_DOWN;
+    ev.id = TOY_KEY_DOWN;
+    for (int i = 0; i < dec.cart_index; i++)
+        prod_dispatch(&ev);
+    ev.id = TOY_KEY_ENTER;
+    prod_dispatch(&ev);
+    if (run_cart != cart) {
+        ckpt_resume_pending = 0;
+        run_cart = NULL;
+        run_step_count = 0;
+        toy_prod_ckpt_disarm(&ckpt_timer);
+        prod_feed_mode = TOY_LIVE_FEED_NONE;
+        prod_sig_created = 0;
+        toy_shell_enter(&shell, TOY_SHELL_GALLERY);
+        note_screen();
+        printf("TOY-PROD-RESUME-ERR cart=%s stage=launch (gallery)\n",
+               cart->name);
+    }
 }
 
 /* One TOUCHDBG line per DOWN the runner acts on (real or
@@ -761,6 +1141,7 @@ static int prod_step_frame(void)
             toy_apply_queue(cart, state_buf, &prod_live_queue,
                             TOY_MAX_EVENTS_PER_STEP);
             cart->step(state_buf);
+            run_step_count++;
             steps_done++;
             if (steps_done < cart->demo_steps_per_frame &&
                 time_us_64() >= deadline)
@@ -779,6 +1160,7 @@ static int prod_step_frame(void)
         toy_apply_queue(cart, state_buf, &prod_live_queue,
                         TOY_MAX_EVENTS_PER_STEP);
         cart->step(state_buf);
+        run_step_count++;
         steps_done++;
         if (steps_done < cart->demo_steps_per_frame &&
             time_us_64() >= deadline)
@@ -1036,12 +1418,14 @@ int main(void)
            (unsigned long)TOY_PRESENTER_FB_BYTES, toy_cart_count,
            TOY_PROD_DBV);
     printf("TOY-PROD-MEM data_bytes=%lu bss_bytes=%lu heap_free_bytes=%lu "
-           "stack_reserved_bytes=%lu state_buf_bytes=%lu\n",
+           "stack_reserved_bytes=%lu state_buf_bytes=%lu "
+           "ckpt_buf_bytes=%lu\n",
            (unsigned long)(&__data_end__ - &__data_start__),
            (unsigned long)(&__bss_end__ - &__bss_start__),
            (unsigned long)(&__HeapLimit - &__end__),
            (unsigned long)(&__StackTop - &__StackBottom),
-           (unsigned long)sizeof state_buf);
+           (unsigned long)sizeof state_buf,
+           (unsigned long)sizeof ckpt_buf);
 
     printf("TOY-PROD-PHASE panel-init\n");
     display_qspi_t transport;
@@ -1086,12 +1470,17 @@ int main(void)
     toy_prod_tap_launch_init(&tap_launch);
     toy_prod_tilt_gate_init(&tilt_gate);
     toy_queue_clear(&prod_live_queue);
+    toy_prod_ckpt_timer_init(&ckpt_timer);
     toy_shell_init(&shell, toy_carts, toy_cart_count);
     prev_screen = 0xFFu;
     note_screen();
     printf("TOY-PROD-SHELL carts=%d touch=%d imu=%d (gallery first; "
            "controls in board/PRODUCT.md)\n",
            toy_cart_count, touch_ok ? 1 : 0, imu_ok ? 1 : 0);
+    /* Desk-toy resume (toy5-flashprod): a valid newest
+     * checkpoint auto-starts its cart from where power
+     * left it; anything else stays in the gallery above. */
+    prod_ckpt_try_resume();
 
     toy_fb_t *fb = toy_presenter_fb(&presenter);
     for (;;) {
@@ -1134,6 +1523,14 @@ int main(void)
                    screen_name(toy_shell_screen(&shell)));
         if (cart_frame)
             prod_pace_account(t1 - t0, t2 - t1, t3 - t2, steps);
+        /* Cadence checkpoint (toy5-flashprod): strictly
+         * after this frame's flush and before the next
+         * frame's step, so the measured XIP stall lands
+         * between frames, never inside step/render/flush. */
+        if (cart_frame &&
+            toy_prod_ckpt_due(&ckpt_timer, toy_clock_mono_ms(),
+                              TOY_PROD_CKPT_INTERVAL_MS))
+            prod_ckpt_save("cadence");
 
         (void)toy_shell_tick(&shell);
         note_screen();

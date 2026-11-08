@@ -374,6 +374,7 @@ endif()
 if(_toy_platform_actual STREQUAL "rp2350")
     add_executable(toy_product
         main_product.c
+        ckpt_flash.c
         presenter.c
         display_co5300.c
         display_qspi_pio.c
@@ -381,6 +382,7 @@ if(_toy_platform_actual STREQUAL "rp2350")
         rtc_pcf85063.c
         imu_qmi8658.c
         touch_cst9217.c
+        ${TOY_ROOT}/core/toy_ckpt.c
         ${TOY_ROOT}/core/toy_fb.c
         ${TOY_ROOT}/core/toy_carts.c
         ${TOY_ROOT}/core/toy_input.c
@@ -432,8 +434,19 @@ if(_toy_platform_actual STREQUAL "rp2350")
             TOY_PRESENTER_MODE_FULL466=${TOY_PRESENTER_MODE_FULL466})
     endif()
     target_compile_options(toy_product PRIVATE -O2 -Wall -Wextra)
+    # Internal-flash checkpoints (toy5-flashprod): pico_flash
+    # provides flash_safe_execute, hardware_flash the
+    # erase/program primitives (board/ckpt_flash.c). Same
+    # single-core bound as toy_board above: core 1 is never
+    # launched, so the IRQ-only safe path is sound; a future
+    # multi-core product must drop PICO_FLASH_ASSUME_CORE1_SAFE
+    # and call flash_safe_execute_core_init() on core 1
+    # instead. TOY_CKPT_FLASH_SELFTEST stays disarmed here.
+    target_compile_definitions(toy_product PRIVATE
+        PICO_FLASH_ASSUME_CORE1_SAFE=1)
     target_link_libraries(toy_product
-        pico_stdlib pico_unique_id hardware_pio hardware_i2c)
+        pico_stdlib pico_unique_id hardware_pio hardware_i2c
+        pico_flash hardware_flash)
     # Same no-hardware-float discipline as toy_board (audit
     # above): sim maths stays muse-softfloat integer code; the
     # presenter/upscale path is integer-only by construction.
