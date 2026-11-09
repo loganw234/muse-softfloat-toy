@@ -24,6 +24,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "orientation.h" /* gravity quadrant + rotation helpers */
 #include "toy_input.h" /* core: toy_event_t, toy_pointer_event */
 
 /* --- touch coordinate mapping ---------------------------------
@@ -64,16 +65,37 @@ static inline int32_t toy_prod_touch_axis(int32_t controller_v)
 
 /* Controller point -> pointer event in toy milli coords
  * (origin glass centre, unit 1/1000 radius, +y down - the
- * toy_px_to_milli convention every cart already consumes). */
+ * toy_px_to_milli convention every cart already consumes).
+ * The _rot form (toy5-rotate) inverse-rotates the
+ * post-mirror glass pixel into canonical orientation by the
+ * current gravity quadrant BEFORE the milli conversion, so
+ * a finger lands on the widget the rotated picture draws
+ * there; rotation 0 is the unrotated mapping verbatim. The
+ * gesture tracker keeps controller-space positions (its
+ * long-press tolerance is a glass-px distance, rotation
+ * invariant) and rotation is applied only here, at event
+ * production, with the quadrant current at emission. */
+static inline void toy_prod_pointer_event_rot(toy_event_t *ev,
+                                              uint32_t type,
+                                              uint32_t contact_id,
+                                              int32_t controller_x,
+                                              int32_t controller_y,
+                                              int rotation)
+{
+    int32_t cx, cy;
+    toy_orient_inv_point(rotation, toy_prod_touch_axis(controller_x),
+                         toy_prod_touch_axis(controller_y),
+                         TOY_PROD_GLASS_PX, &cx, &cy);
+    toy_pointer_event(ev, type, contact_id, cx, cy, TOY_PROD_GLASS_PX);
+}
+
 static inline void toy_prod_pointer_event(toy_event_t *ev, uint32_t type,
                                           uint32_t contact_id,
                                           int32_t controller_x,
                                           int32_t controller_y)
 {
-    toy_pointer_event(ev, type, contact_id,
-                      toy_prod_touch_axis(controller_x),
-                      toy_prod_touch_axis(controller_y),
-                      TOY_PROD_GLASS_PX);
+    toy_prod_pointer_event_rot(ev, type, contact_id, controller_x,
+                               controller_y, 0);
 }
 
 static inline toy_event_t toy_prod_key_event(uint32_t key)
@@ -174,13 +196,18 @@ static inline bool toy_prod_gesture_any_active(const toy_prod_gesture_t *g)
 }
 
 /* present[id]/px/py describe the new report in controller
- * space. Returns the number of events written to out[]. */
-static inline size_t toy_prod_gesture_report(
+ * space. Returns the number of events written to out[].
+ * rotation is the current gravity quadrant (toy5-rotate):
+ * produced pointer events are inverse-rotated into
+ * canonical coords; the tracked positions stay in
+ * controller space, so gesture timing/tolerance behaviour
+ * is identical at every quadrant. */
+static inline size_t toy_prod_gesture_report_rot(
     toy_prod_gesture_t *g, uint64_t now_ms, bool running,
     const bool present[TOY_PROD_MAX_CONTACTS],
     const int32_t px[TOY_PROD_MAX_CONTACTS],
     const int32_t py[TOY_PROD_MAX_CONTACTS],
-    toy_event_t *out, size_t out_cap)
+    toy_event_t *out, size_t out_cap, int rotation)
 {
     size_t n = 0;
     /* Releases first (sensor-test order: a vanished track's
@@ -189,8 +216,8 @@ static inline size_t toy_prod_gesture_report(
         toy_prod_contact_t *c = &g->contact[id];
         if (c->active && !present[id]) {
             if (!c->consumed && n < out_cap)
-                toy_prod_pointer_event(&out[n++], TOY_EV_POINTER_UP,
-                                       id, c->cx, c->cy);
+                toy_prod_pointer_event_rot(&out[n++], TOY_EV_POINTER_UP,
+                                           id, c->cx, c->cy, rotation);
             c->active = false;
             c->consumed = false;
             c->long_fired = false;
@@ -235,9 +262,9 @@ static inline size_t toy_prod_gesture_report(
                     g->first_down_ms = now_ms;
                 }
                 if (n < out_cap)
-                    toy_prod_pointer_event(&out[n++],
-                                           TOY_EV_POINTER_DOWN, id,
-                                           c->cx, c->cy);
+                    toy_prod_pointer_event_rot(&out[n++],
+                                               TOY_EV_POINTER_DOWN, id,
+                                               c->cx, c->cy, rotation);
             }
         } else {
             /* Straying past tolerance from the DOWN point makes
@@ -255,9 +282,9 @@ static inline size_t toy_prod_gesture_report(
                 c->cx = px[id];
                 c->cy = py[id];
                 if (n < out_cap)
-                    toy_prod_pointer_event(&out[n++],
-                                           TOY_EV_POINTER_MOVE, id,
-                                           c->cx, c->cy);
+                    toy_prod_pointer_event_rot(&out[n++],
+                                               TOY_EV_POINTER_MOVE, id,
+                                               c->cx, c->cy, rotation);
             } else {
                 c->cx = px[id];
                 c->cy = py[id];
@@ -265,6 +292,18 @@ static inline size_t toy_prod_gesture_report(
         }
     }
     return n;
+}
+
+/* Unrotated (quadrant 0) report, the pre-toy5-rotate shape. */
+static inline size_t toy_prod_gesture_report(
+    toy_prod_gesture_t *g, uint64_t now_ms, bool running,
+    const bool present[TOY_PROD_MAX_CONTACTS],
+    const int32_t px[TOY_PROD_MAX_CONTACTS],
+    const int32_t py[TOY_PROD_MAX_CONTACTS],
+    toy_event_t *out, size_t out_cap)
+{
+    return toy_prod_gesture_report_rot(g, now_ms, running, present, px,
+                                       py, out, out_cap, 0);
 }
 
 /* Frame-cadence long-press timer. Writes at most one KEY_ESC. */
@@ -343,14 +382,29 @@ static inline int32_t toy_prod_clamp_mg(int32_t v)
     return v;
 }
 
-static inline void toy_prod_tilt_event(toy_event_t *ev, int32_t ax_mg,
-                                       int32_t ay_mg)
+/* The _rot form (toy5-rotate) additionally inverse-rotates
+ * the glass-space falling vector into canonical coords by
+ * the gravity quadrant, so pond/gravity slosh agrees with
+ * the rotated picture: held still in ANY quadrant the event
+ * reads ~(0,+1000) - down in canonical (picture) space.
+ * Rotation is an axis swap/sign, so the +/-2000 clamp is
+ * applied in glass space first and survives it exactly. */
+static inline void toy_prod_tilt_event_rot(toy_event_t *ev, int32_t ax_mg,
+                                           int32_t ay_mg, int rotation)
 {
     toy_event_t e = { 0 };
     e.type = TOY_EV_TILT;
-    e.x = toy_prod_clamp_mg(TOY_PROD_TILT_X_SIGN * ax_mg);
-    e.y = toy_prod_clamp_mg(TOY_PROD_TILT_Y_SIGN * ay_mg);
+    toy_orient_inv_vec(rotation,
+                       toy_prod_clamp_mg(TOY_PROD_TILT_X_SIGN * ax_mg),
+                       toy_prod_clamp_mg(TOY_PROD_TILT_Y_SIGN * ay_mg),
+                       &e.x, &e.y);
     *ev = e;
+}
+
+static inline void toy_prod_tilt_event(toy_event_t *ev, int32_t ax_mg,
+                                       int32_t ay_mg)
+{
+    toy_prod_tilt_event_rot(ev, ax_mg, ay_mg, 0);
 }
 
 typedef struct {
@@ -376,13 +430,20 @@ static inline int32_t toy_prod_i32_abs(int32_t v)
 /* Decide + record: true (and *ev filled) iff this sample
  * should become a TILT now (>=33 ms since the last sent AND
  * some axis moved >=20 mg from the last SENT values; the
- * first sample always sends). */
-static inline bool toy_prod_tilt_gate_poll(toy_prod_tilt_gate_t *t,
-                                           uint64_t now_ms, int32_t ax_mg,
-                                           int32_t ay_mg, toy_event_t *ev)
+ * first sample always sends). The _rot form compares and
+ * records in canonical (rotated) coords; the runner resets
+ * the gate on a quadrant change so carts immediately learn
+ * the new canonical down even if the rotated vector happens
+ * to sit within 20 mg of the last sent one. */
+static inline bool toy_prod_tilt_gate_poll_rot(toy_prod_tilt_gate_t *t,
+                                               uint64_t now_ms,
+                                               int32_t ax_mg,
+                                               int32_t ay_mg,
+                                               toy_event_t *ev,
+                                               int rotation)
 {
     toy_event_t cand;
-    toy_prod_tilt_event(&cand, ax_mg, ay_mg);
+    toy_prod_tilt_event_rot(&cand, ax_mg, ay_mg, rotation);
     if (t->have) {
         if (now_ms < t->last_ms ||
             now_ms - t->last_ms < TOY_PROD_TILT_MIN_MS)
@@ -399,6 +460,13 @@ static inline bool toy_prod_tilt_gate_poll(toy_prod_tilt_gate_t *t,
     return true;
 }
 
+static inline bool toy_prod_tilt_gate_poll(toy_prod_tilt_gate_t *t,
+                                           uint64_t now_ms, int32_t ax_mg,
+                                           int32_t ay_mg, toy_event_t *ev)
+{
+    return toy_prod_tilt_gate_poll_rot(t, now_ms, ax_mg, ay_mg, ev, 0);
+}
+
 /* --- device-as-dial (gyro Z integration) -----------------------
  *
  * Screen-normal axis: az is the screen-normal accel axis
@@ -410,7 +478,11 @@ static inline bool toy_prod_tilt_gate_poll(toy_prod_tilt_gate_t *t,
  * selection down / increases values (toy_shell.c ev_detents),
  * and clockwise = increase is the natural dial reading, so
  * positive gz integrates to positive milliturns. One define
- * flips it if the first flash disagrees.
+ * flips it if the first flash disagrees. The gravity
+ * quadrant (toy5-rotate) deliberately does NOT touch this:
+ * rotation about the screen normal is the same physical
+ * dial motion in every quadrant, and clockwise-as-seen is
+ * still clockwise once the picture turns with the device.
  *
  * Fixed-point integration: milliturns = mdps * dt_ms /
  * 360000 exactly (mdps*ms = 1e-6 deg; 1 milliturn = 0.36

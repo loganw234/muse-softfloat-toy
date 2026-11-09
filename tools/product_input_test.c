@@ -755,6 +755,274 @@ static void test_tap_launch(void)
           "tap: own UP still launches after other finger lifted");
 }
 
+/* --- gravity-quadrant rotation (toy5-rotate) --------------------
+ *
+ * Frame table (board/orientation.h): falling f = (-ax,-ay) in
+ * glass space; held still, quadrant q's rest accel is
+ *   q0 (0,-1000)  q1 (-1000,0)  q2 (0,+1000)  q3 (+1000,0)
+ * and in EVERY quadrant the rotated TILT must read (0,+1000):
+ * down in canonical (picture) space. */
+
+static const int32_t REST_AX[4] = { 0, -1000, 0, 1000 };
+static const int32_t REST_AY[4] = { -1000, 0, 1000, 0 };
+
+static void test_orient_candidate(void)
+{
+    for (int q = 0; q < 4; q++)
+        CHECK(toy_orient_candidate(REST_AX[q], REST_AY[q]) == q,
+              "rest accel votes for its own quadrant");
+    /* Near-flat: in-plane magnitude under the 350 mg floor. */
+    CHECK(toy_orient_candidate(0, 0) == -1, "flat (az dominant): none");
+    CHECK(toy_orient_candidate(-100, 100) == -1,
+          "|f| ~141 mg: none (flat-ish)");
+    CHECK(toy_orient_candidate(0, -349) == -1, "349 mg: below floor");
+    CHECK(toy_orient_candidate(0, -350) == 0, "350 mg on axis: q0");
+    /* 45-degree ambiguity stays put at full 1 g in-plane. */
+    CHECK(toy_orient_candidate(-707, -707) == -1,
+          "diagonal f=(707,707): none");
+    CHECK(toy_orient_candidate(707, -707) == -1,
+          "diagonal f=(-707,707): none");
+    /* Margin edge: dominant-other = 250 exactly votes, 249 not.
+     * f=(800,550): ax=-800, ay=-550. */
+    CHECK(toy_orient_candidate(-800, -550) == 1, "margin 250: votes q1");
+    CHECK(toy_orient_candidate(-800, -551) == -1, "margin 249: none");
+    CHECK(toy_orient_candidate(-550, 800) == 2, "margin 250 (y): q2");
+    /* Off-axis noise inside the margin still votes the axis. */
+    CHECK(toy_orient_candidate(-120, -980) == 0, "slight lean: q0");
+    CHECK(toy_orient_candidate(980, 120) == 3, "slight lean: q3");
+}
+
+static void test_orient_tracker(void)
+{
+    toy_orient_t o;
+    toy_orient_init(&o);
+    CHECK(o.quadrant == 0, "boot quadrant 0");
+    /* Dwell: q1 candidate must persist the full 500 ms. */
+    CHECK(!toy_orient_update(&o, -1000, 0, 1000), "dwell starts");
+    CHECK(!toy_orient_update(&o, -1000, 0, 1499) && o.quadrant == 0,
+          "499 ms: still q0");
+    CHECK(toy_orient_update(&o, -1000, 0, 1500) && o.quadrant == 1,
+          "500 ms: switches to q1, reports change");
+    CHECK(!toy_orient_update(&o, -1000, 0, 1600) && o.quadrant == 1,
+          "steady q1: no repeated change report");
+    /* Flat keeps the last quadrant indefinitely. */
+    for (uint64_t t = 2000; t <= 20000; t += 1000)
+        CHECK(!toy_orient_update(&o, 0, 0, t) && o.quadrant == 1,
+              "flat forever: keeps q1");
+    /* Slow tilt across the diagonal must not flap: alternate
+     * q2/q1 votes every 100 ms (crossing the boundary band)
+     * never dwells 500 ms on either. */
+    int flaps = 0;
+    for (uint64_t t = 21000; t < 25000; t += 100) {
+        bool even = ((t / 100) % 2u) == 0u;
+        if (toy_orient_update(&o, even ? 0 : -1000, even ? 1000 : 0, t))
+            flaps++;
+    }
+    CHECK(flaps == 0 && o.quadrant == 1,
+          "alternating votes across boundary: no flap");
+    /* An interrupted dwell restarts from zero: 400 ms of q2,
+     * one flat sample, then q2 needs a fresh full 500 ms. */
+    CHECK(!toy_orient_update(&o, 0, 1000, 26000), "q2 dwell starts");
+    CHECK(!toy_orient_update(&o, 0, 1000, 26400), "q2 at 400 ms");
+    CHECK(!toy_orient_update(&o, 0, 0, 26450), "flat interrupts");
+    CHECK(!toy_orient_update(&o, 0, 1000, 26500), "q2 dwell restarts");
+    CHECK(!toy_orient_update(&o, 0, 1000, 26999) && o.quadrant == 1,
+          "restarted dwell at 499 ms: still q1");
+    CHECK(toy_orient_update(&o, 0, 1000, 27000) && o.quadrant == 2,
+          "restarted dwell at 500 ms: q2");
+    /* Returning to the current quadrant's own vote clears a
+     * pending switch away from it. */
+    CHECK(!toy_orient_update(&o, 1000, 0, 28000), "q3 dwell starts");
+    CHECK(!toy_orient_update(&o, 0, 1000, 28300), "back to q2 vote");
+    CHECK(!toy_orient_update(&o, 1000, 0, 28400), "q3 dwell restarts");
+    CHECK(!toy_orient_update(&o, 1000, 0, 28899) && o.quadrant == 2,
+          "q3 at 499 ms after restart: still q2");
+    CHECK(toy_orient_update(&o, 1000, 0, 28900) && o.quadrant == 3,
+          "q3 after full restarted dwell");
+    /* Full walk home q3 -> q0. */
+    CHECK(!toy_orient_update(&o, 0, -1000, 29000), "q0 dwell");
+    CHECK(toy_orient_update(&o, 0, -1000, 29500) && o.quadrant == 0,
+          "walk completes at q0");
+}
+
+static void test_orient_vec_points(void)
+{
+    /* fwd . inv and inv . fwd are identities (points, 466). */
+    static const int32_t pts[][2] = {
+        { 0, 0 }, { 465, 0 }, { 0, 465 }, { 465, 465 },
+        { 233, 0 }, { 0, 233 }, { 100, 300 }, { 232, 233 },
+    };
+    for (int q = 0; q < 4; q++)
+        for (size_t i = 0; i < sizeof pts / sizeof pts[0]; i++) {
+            int32_t a, b, c, d;
+            toy_orient_fwd_point(q, pts[i][0], pts[i][1], 466, &a, &b);
+            toy_orient_inv_point(q, a, b, 466, &c, &d);
+            CHECK(c == pts[i][0] && d == pts[i][1],
+                  "inv(fwd(p)) == p, all quadrants");
+            toy_orient_inv_point(q, pts[i][0], pts[i][1], 466, &a, &b);
+            toy_orient_fwd_point(q, a, b, 466, &c, &d);
+            CHECK(c == pts[i][0] && d == pts[i][1],
+                  "fwd(inv(p)) == p, all quadrants");
+            int32_t vx, vy, wx, wy;
+            toy_orient_fwd_vec(q, 300, -400, &vx, &vy);
+            toy_orient_inv_vec(q, vx, vy, &wx, &wy);
+            CHECK(wx == 300 && wy == -400, "vec inv(fwd(v)) == v");
+        }
+    /* Normalisation: 5 == 1, -1 == 3. */
+    int32_t a, b, c, d;
+    toy_orient_fwd_vec(5, 7, 9, &a, &b);
+    toy_orient_fwd_vec(1, 7, 9, &c, &d);
+    CHECK(a == c && b == d, "quadrant 5 normalises to 1");
+    toy_orient_inv_point(-1, 7, 9, 466, &a, &b);
+    toy_orient_inv_point(3, 7, 9, 466, &c, &d);
+    CHECK(a == c && b == d, "quadrant -1 normalises to 3");
+}
+
+static void test_touch_rotation(void)
+{
+    /* Round-trip: a canonical point drawn at fwd_q(point) on
+     * glass, touched there (controller = 465-glass under the
+     * shipped mirror), must produce the unrotated milli of
+     * the canonical point at every quadrant. */
+    static const int32_t pts[][2] = {
+        { 0, 0 }, { 465, 0 }, { 0, 465 }, { 465, 465 },
+        { 466 / 2, 0 }, { 100, 300 }, { 233, 233 }, { 40, 425 },
+    };
+    for (int q = 0; q < 4; q++)
+        for (size_t i = 0; i < sizeof pts / sizeof pts[0]; i++) {
+            int32_t gx, gy;
+            toy_orient_fwd_point(q, pts[i][0], pts[i][1],
+                                 TOY_PROD_GLASS_PX, &gx, &gy);
+            /* Mirror is an involution: controller that lands
+             * on glass (gx,gy) is (465-gx, 465-gy). */
+            toy_event_t ev;
+            toy_prod_pointer_event_rot(&ev, TOY_EV_POINTER_DOWN, 0,
+                                       TOY_PROD_COORD_MAX_PX - gx,
+                                       TOY_PROD_COORD_MAX_PX - gy, q);
+            CHECK(ev.x == toy_px_to_milli(pts[i][0], TOY_PROD_GLASS_PX) &&
+                      ev.y == toy_px_to_milli(pts[i][1],
+                                              TOY_PROD_GLASS_PX),
+                  "display-rotate then touch-inverts to same milli");
+        }
+    /* Rotation 0 == the plain mapping, exact (incl. the old
+     * pinned corner (996,-1000) for controller (0,465)). */
+    toy_event_t a, b;
+    toy_prod_pointer_event_rot(&a, TOY_EV_POINTER_DOWN, 1, 0, 465, 0);
+    toy_prod_pointer_event(&b, TOY_EV_POINTER_DOWN, 1, 0, 465);
+    CHECK(a.x == b.x && a.y == b.y && a.x == 996 && a.y == -1000,
+          "q0 pointer == unrotated mapping exactly");
+    /* q2 negates the glass point: controller (0,465) mirrors
+     * to glass (465,0), inverse-rotates to canonical (0,465):
+     * milli (-1000, +996) - opposite corner from q0. */
+    toy_prod_pointer_event_rot(&a, TOY_EV_POINTER_DOWN, 0, 0, 465, 2);
+    CHECK(a.x == -1000 && a.y == 996, "q2 touch: opposite corner");
+}
+
+static size_t report_rot(toy_prod_gesture_t *g, uint64_t ms, int rot,
+                         bool running, bool p0, int32_t x0, int32_t y0,
+                         bool p1, int32_t x1, int32_t y1,
+                         toy_event_t *out)
+{
+    bool present[2] = { p0, p1 };
+    int32_t px[2] = { x0, x1 };
+    int32_t py[2] = { y0, y1 };
+    return toy_prod_gesture_report_rot(g, ms, running, present, px, py,
+                                       out, 6, rot);
+}
+
+static void test_gesture_rotation(void)
+{
+    /* Same physical finger, four quadrants: controller point
+     * (10,20) mirrors to glass (455,445). The DOWN milli must
+     * be the inverse-rotation of that glass point; gesture
+     * behaviour (long-press etc.) is pinned unchanged by the
+     * q-agnostic tests above via the rot-0 wrapper. */
+    for (int q = 0; q < 4; q++) {
+        toy_prod_gesture_t g;
+        toy_prod_gesture_init(&g);
+        toy_event_t out[6];
+        size_t n = report_rot(&g, 100, q, true, true, 10, 20,
+                              false, 0, 0, out);
+        int32_t cx, cy;
+        toy_orient_inv_point(q, 455, 445, TOY_PROD_GLASS_PX, &cx, &cy);
+        CHECK(n == 1 && out[0].type == TOY_EV_POINTER_DOWN &&
+                  out[0].x == toy_px_to_milli(cx, TOY_PROD_GLASS_PX) &&
+                  out[0].y == toy_px_to_milli(cy, TOY_PROD_GLASS_PX),
+              "gesture DOWN inverse-rotated by quadrant");
+        /* The matching UP (stored controller point) rotates
+         * the same way. */
+        n = report_rot(&g, 200, q, true, false, 0, 0, false, 0, 0,
+                       out);
+        CHECK(n == 1 && out[0].type == TOY_EV_POINTER_UP &&
+                  out[0].x == toy_px_to_milli(cx, TOY_PROD_GLASS_PX) &&
+                  out[0].y == toy_px_to_milli(cy, TOY_PROD_GLASS_PX),
+              "gesture UP inverse-rotated identically");
+    }
+    /* Wrapper identity: report() == report_rot(...,0). */
+    toy_prod_gesture_t g1, g2;
+    toy_prod_gesture_init(&g1);
+    toy_prod_gesture_init(&g2);
+    toy_event_t o1[6], o2[6];
+    size_t n1 = report(&g1, 0, true, true, 300, 111, false, 0, 0, o1);
+    size_t n2 = report_rot(&g2, 0, 0, true, true, 300, 111,
+                           false, 0, 0, o2);
+    CHECK(n1 == n2 && n1 == 1 && o1[0].x == o2[0].x && o1[0].y == o2[0].y,
+          "gesture report wrapper == rot 0");
+}
+
+static void test_tilt_rotation(void)
+{
+    toy_event_t ev;
+    /* Held still in each quadrant: rotated TILT is canonical
+     * down (0,+1000) every time. */
+    for (int q = 0; q < 4; q++) {
+        toy_prod_tilt_event_rot(&ev, REST_AX[q], REST_AY[q], q);
+        CHECK(ev.type == TOY_EV_TILT && ev.x == 0 && ev.y == 1000,
+              "rest in quadrant q: TILT == (0,+1000)");
+    }
+    /* One glass falling vector (300,400) [ax=-300, ay=-400]
+     * under all four inverse rotations (hand table):
+     * q0 (300,400) q1 (-400,300) q2 (-300,-400) q3 (400,-300). */
+    static const int32_t want[4][2] = {
+        { 300, 400 }, { -400, 300 }, { -300, -400 }, { 400, -300 },
+    };
+    for (int q = 0; q < 4; q++) {
+        toy_prod_tilt_event_rot(&ev, -300, -400, q);
+        CHECK(ev.x == want[q][0] && ev.y == want[q][1],
+              "tilt vector rotates by quadrant (hand table)");
+    }
+    /* Clamp survives rotation (applied in glass space). */
+    toy_prod_tilt_event_rot(&ev, 9000, -9000, 1);
+    CHECK(ev.x == -2000 && ev.y == -2000,
+          "wild accel: clamp then rotate q1 = (-2000,-2000)");
+    /* Gate in rotated coords: first sample sends canonical;
+     * same physical sample re-polled is a <20 mg no-op; after
+     * the runner-style gate reset on a quadrant change, the
+     * same physical sample sends again in the new frame. */
+    toy_prod_tilt_gate_t t;
+    toy_prod_tilt_gate_init(&t);
+    CHECK(toy_prod_tilt_gate_poll_rot(&t, 0, -1000, 0, &ev, 1) &&
+              ev.x == 0 && ev.y == 1000,
+          "gate q1: rest sends canonical down");
+    CHECK(!toy_prod_tilt_gate_poll_rot(&t, 100, -1000, 0, &ev, 1),
+          "gate q1: unchanged sample gated");
+    toy_prod_tilt_gate_init(&t); /* what main_product does on change */
+    CHECK(toy_prod_tilt_gate_poll_rot(&t, 110, -1000, 0, &ev, 0) &&
+              ev.x == 1000 && ev.y == 0,
+          "gate reset + q0: same sample sends in new frame");
+    /* Wrapper identity vs the pinned unrotated gate. */
+    toy_prod_tilt_gate_init(&t);
+    toy_event_t e2;
+    int s1 = toy_prod_tilt_gate_poll(&t, 0, -300, -400, &e2) ? 1 : 0;
+    toy_prod_tilt_gate_t t2;
+    toy_prod_tilt_gate_init(&t2);
+    int s2 = toy_prod_tilt_gate_poll_rot(&t2, 0, -300, -400, &ev, 0)
+                 ? 1 : 0;
+    CHECK(s1 == s2 && e2.x == ev.x && e2.y == ev.y && ev.x == 300 &&
+              ev.y == 400,
+          "tilt gate wrapper == rot 0 (pinned 300,400)");
+}
+
 int main(void)
 {
     printf("clock civil <-> epoch\n");
@@ -780,6 +1048,13 @@ int main(void)
     test_touch_pending_merge();
     test_gallery_row_math();
     test_tap_launch();
+    printf("gravity-quadrant rotation (toy5-rotate)\n");
+    test_orient_candidate();
+    test_orient_tracker();
+    test_orient_vec_points();
+    test_touch_rotation();
+    test_gesture_rotation();
+    test_tilt_rotation();
     if (failures == 0) {
         printf("product_input_test: PASS (%d checks)\n", checks);
         return 0;

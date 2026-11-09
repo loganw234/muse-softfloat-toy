@@ -60,6 +60,33 @@
  * the same source row (466-360 = 106 of them) reuse the last
  * expanded row; the cache is reset at the start of every
  * flush, so it can never serve a stale row across frames.
+ *
+ * Gravity-quadrant rotation (toy5-rotate, board/orientation.h):
+ * the framebuffer stays canonical; flush samples it through
+ * the presenter's rotation quadrant (boot 0, set by the
+ * runner via toy_presenter_set_rotation when gravity says the
+ * device turned). Glass pixel (dx,dy) shows canonical pixel
+ * R_q^-1(dx,dy) sampled through the same pinned maps:
+ * (cx,cy) = inv_point(dx,dy), src = fb(row_src[cy],
+ * col_src[cx]) - toy_presenter_rot_src is that one formula.
+ * At q=1/q=3 the source column depends on dy and the source
+ * row on dx, so no pair of 1-D maps can express the rotation
+ * (a full 466x466 index map would be another framebuffer of
+ * RAM); instead toy_presenter_build_glass_row walks one
+ * glass row per quadrant with the existing 1-D maps - a row
+ * expansion at q=0/q=2, a column gather at q=1/q=3 - still
+ * table lookup only, no division, no extra RAM. The row
+ * cache keys on the EFFECTIVE repeated source index after
+ * rotation (source row at q=0/q=2, source column at
+ * q=1/q=3: toy_presenter_rot_cache_key), so the same 106
+ * repeated glass rows are skipped at every quadrant.
+ * Rotation 0 is pixel- and byte-identical to the pre-rotation
+ * flush (the q=0 builder is the old expand_row verbatim, and
+ * FULL466 at q=0 keeps its verbatim whole-fb stream; rotated
+ * FULL466 streams built rows through the identity maps).
+ * Steady-state flush cost is unchanged in shape: one lookup
+ * (+ one multiply for the q=1/q=3 column gather) per glass
+ * pixel, no per-quadrant-change rebuild at all.
  */
 #ifndef PRESENTER_H
 #define PRESENTER_H
@@ -68,6 +95,7 @@
 #include <stdint.h>
 
 #include "display_co5300.h"
+#include "orientation.h"
 #include "toy_fb.h"
 
 /* Mode select. Default (b) 360-upscale per the measurement
@@ -103,11 +131,17 @@ typedef struct {
      * in full mode. 2 * 466 * 2 = 1,864 B. */
     uint16_t col_src[CO5300_WIDTH];
     uint16_t row_src[CO5300_HEIGHT];
-    /* Source row currently expanded in row[], or -1. Reset at
-     * the start of every flush; within one flush the
-     * framebuffer does not change, so consecutive glass rows
-     * sharing a source row reuse row[] verbatim. */
-    int cached_sy;
+    /* Gravity quadrant the flush samples through (toy5-rotate;
+     * board/orientation.h semantics, boot 0). Presentation
+     * only - fb pixels are always canonical. */
+    int rotation;
+    /* Effective cache key of the glass row currently built in
+     * row[], or -1: the source row at rotation 0/2, the
+     * source column at 1/3 (toy_presenter_rot_cache_key).
+     * Reset at the start of every flush; within one flush the
+     * framebuffer and rotation do not change, so consecutive
+     * glass rows sharing a key reuse row[] verbatim. */
+    int cached_key;
 } toy_presenter_t;
 
 /* Bind to an initialised panel and point fb at the presenter's
@@ -117,6 +151,11 @@ void toy_presenter_init(toy_presenter_t *p, co5300_t *panel);
 /* The framebuffer carts render into. Persistent across frames;
  * the runner owns clearing policy. */
 toy_fb_t *toy_presenter_fb(toy_presenter_t *p);
+
+/* Set the gravity quadrant subsequent flushes sample through
+ * (normalised mod 4; board/orientation.h). Cheap: no map
+ * rebuild - the per-row builder reads it each flush. */
+void toy_presenter_set_rotation(toy_presenter_t *p, int quadrant);
 
 /* Flush the whole framebuffer to the full glass. CO5300_OK or a
  * driver error. Pixel-exact per the header contract. */
@@ -145,5 +184,37 @@ void toy_presenter_build_map(uint16_t *map, int src_size, int dst_size);
 void toy_presenter_expand_row(const uint16_t *src_row,
                               const uint16_t *col_src,
                               uint16_t *dst_row, int dst_w);
+
+/* The one rotation formula (pure, host-testable): glass pixel
+ * (dx,dy) of a square dst_size glass at quadrant rotation
+ * samples source (*sx,*sy) = (col_src[cx], row_src[cy]) where
+ * (cx,cy) = toy_orient_inv_point(rotation, dx, dy). At
+ * rotation 0 this is exactly (col_src[dx], row_src[dy]). */
+void toy_presenter_rot_src(int rotation, int dx, int dy,
+                           const uint16_t *col_src,
+                           const uint16_t *row_src, int dst_size,
+                           int *sx, int *sy);
+
+/* Cache key for glass row dy at this rotation: the source
+ * index that stays constant across the row and repeats for
+ * 106 glass rows (source row at q=0/q=2, source column at
+ * q=1/q=3). Equal keys on consecutive dy <=> identical
+ * built rows (rotation fixed within a flush). */
+int toy_presenter_rot_cache_key(int rotation, int dy,
+                                const uint16_t *col_src,
+                                const uint16_t *row_src, int dst_size);
+
+/* Build one glass row (dst_size pixels, square glass) at this
+ * rotation: dst_row[dx] = fb_px[sy*fb_w + sx] with (sx,sy)
+ * from toy_presenter_rot_src. No division. q=0 is
+ * toy_presenter_expand_row over the mapped source row;
+ * q=2 the same with both maps read backwards; q=1/q=3 gather
+ * down one constant source column. With identity maps and a
+ * dst_size-wide fb this is the FULL466 pure rotation. */
+void toy_presenter_build_glass_row(const uint16_t *fb_px, int fb_w,
+                                   const uint16_t *col_src,
+                                   const uint16_t *row_src,
+                                   int rotation, int dy,
+                                   uint16_t *dst_row, int dst_size);
 
 #endif

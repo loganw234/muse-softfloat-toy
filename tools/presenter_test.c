@@ -26,7 +26,20 @@
  *      the map is pixel-identical to the direct formula, a
  *      full-frame pattern flushed through the map matches the
  *      independent sampling, and the repeated-row cache never
- *      serves a stale row across flushes.
+ *      serves a stale row across flushes;
+ *   6. gravity-quadrant rotation (toy5-rotate): all four
+ *      quadrants on a pattern fb + asymmetric corner/edge
+ *      markers against an independently restated rotation,
+ *      rotation 0 byte-for-byte against the unrotated stream
+ *      built from the double map, the rotated row cache, and
+ *      the FULL466 identity-map rotation via the pure row
+ *      builder.
+ *
+ * Rotation reference (restated here, not shared with the
+ * implementation): glass (dx,dy) at quadrant q shows the
+ * canonical glass-size point inv_q(dx,dy) with
+ *   q0 (dx,dy)  q1 (465-dy,dx)  q2 (465-dx,465-dy)  q3 (dy,465-dx)
+ * then the usual map_ref sampling into the source fb.
  *
  * Build (from repo root, Git Bash): gcc -O2 -std=c11 -Wall
  * -Wextra -Werror, includes libs/muse-softfloat/include, core
@@ -382,7 +395,7 @@ static void test_col_map(void)
     /* Monotone-surjective 360 -> 466: exactly 106 repeated
      * rows for the flush cache to reuse. */
     CHECK(repeats == 106);
-    CHECK(presenter.cached_sy == -1);
+    CHECK(presenter.cached_key == -1);
 
     /* expand_row via the map == direct formula, every column. */
     uint16_t src[360], dst[466];
@@ -419,6 +432,226 @@ static void test_col_map(void)
     check_glass_matches(fb);
 }
 
+/* --- rotation (toy5-rotate) ------------------------------------ */
+
+static void ref_inv_point(int q, int x, int y, int n, int *ox, int *oy)
+{
+    switch (q & 3) {
+    case 1:  *ox = n - 1 - y; *oy = x;         break;
+    case 2:  *ox = n - 1 - x; *oy = n - 1 - y; break;
+    case 3:  *ox = y;         *oy = n - 1 - x; break;
+    default: *ox = x;         *oy = y;         break;
+    }
+}
+
+/* Expected source pixel under glass (dx,dy) at quadrant q,
+ * via the restated inverse rotation + double map. */
+static void ref_rot_src(const toy_fb_t *src, int q, int dx, int dy,
+                        int *sx, int *sy)
+{
+    int cx, cy;
+    ref_inv_point(q, dx, dy, 466, &cx, &cy);
+    *sx = map_ref(cx, src->w, 466);
+    *sy = map_ref(cy, src->h, 466);
+}
+
+static void check_glass_matches_rot(const toy_fb_t *src, int q)
+{
+    for (int dy = 0; dy < 466; dy++)
+        for (int dx = 0; dx < 466; dx++) {
+            int sx, sy;
+            ref_rot_src(src, q, dx, dy, &sx, &sy);
+            uint16_t want = src->px[(size_t)sy * (size_t)src->w +
+                                    (size_t)sx];
+            if (glass_px(dx, dy) != want) {
+                printf("FAIL rot%d glass(%d,%d)=%04x want "
+                       "src(%d,%d)=%04x\n",
+                       q, dx, dy, glass_px(dx, dy), sx, sy, want);
+                failures++;
+                return;
+            }
+        }
+}
+
+static uint8_t cap_rot0[CAP_PIX];
+
+static void test_rotation(void)
+{
+    toy_fb_t *fb = toy_presenter_fb(&presenter);
+
+    /* Quadrant normalisation. */
+    toy_presenter_set_rotation(&presenter, 4);
+    CHECK(presenter.rotation == 0);
+    toy_presenter_set_rotation(&presenter, -1);
+    CHECK(presenter.rotation == 3);
+    toy_presenter_set_rotation(&presenter, 0);
+    CHECK(presenter.rotation == 0);
+
+    /* The exported formula == restated rotation + presenter
+     * maps, over a coarse grid x all quadrants; and the
+     * cache-key repeats: exactly 106 repeated glass rows at
+     * EVERY quadrant (source col repeats mirror row ones). */
+    for (int q = 0; q < 4; q++) {
+        int repeats = 0;
+        for (int dy = 0; dy < 466; dy++) {
+            int key = toy_presenter_rot_cache_key(
+                q, dy, presenter.col_src, presenter.row_src, 466);
+            if (dy > 0 &&
+                key == toy_presenter_rot_cache_key(
+                           q, dy - 1, presenter.col_src,
+                           presenter.row_src, 466))
+                repeats++;
+            for (int dx = 0; dx < 466; dx += 37) {
+                int sx, sy, ex, ey;
+                toy_presenter_rot_src(q, dx, dy, presenter.col_src,
+                                      presenter.row_src, 466, &sx, &sy);
+                ref_rot_src(fb, q, dx, dy, &ex, &ey);
+                CHECK(sx == ex && sy == ey);
+            }
+        }
+        CHECK(repeats == 106);
+    }
+
+    /* Pattern fb at all four quadrants through the real wire. */
+    for (int y = 0; y < 360; y++)
+        for (int x = 0; x < 360; x++)
+            fb->px[(size_t)y * 360 + (size_t)x] =
+                (uint16_t)((unsigned)(x + 3) * 40503u ^
+                           (unsigned)(y + 7) * 257u ^
+                           (unsigned)(x * 3 ^ y * 5));
+    for (int q = 0; q < 4; q++) {
+        toy_presenter_set_rotation(&presenter, q);
+        flush_capture();
+        check_glass_matches_rot(fb, q);
+        if (q == 0)
+            memcpy(cap_rot0, cap_pix, CAP_PIX);
+    }
+
+    /* Rotation 0 == unrotated stream BYTE-for-byte: rebuild
+     * the expected wire bytes from the double map (high byte
+     * first) and compare against the saved capture. Also:
+     * returning to 0 after other quadrants reproduces it. */
+    {
+        size_t bad = 0;
+        for (int dy = 0; dy < 466; dy++)
+            for (int dx = 0; dx < 466; dx++) {
+                int sx = map_ref(dx, 360, 466);
+                int sy = map_ref(dy, 360, 466);
+                uint16_t want = fb->px[(size_t)sy * 360 + (size_t)sx];
+                size_t i = ((size_t)dy * 466 + (size_t)dx) * 2;
+                if (cap_rot0[i] != (uint8_t)(want >> 8) ||
+                    cap_rot0[i + 1] != (uint8_t)(want & 0xffu))
+                    bad++;
+            }
+        CHECK(bad == 0);
+        toy_presenter_set_rotation(&presenter, 0);
+        flush_capture();
+        CHECK(memcmp(cap_rot0, cap_pix, CAP_PIX) == 0);
+    }
+
+    /* Asymmetric markers: 4 corners + top-edge midpoint, each
+     * a distinct colour. At every quadrant each marker's
+     * glass footprint must be EXACTLY the rotated preimage. */
+    static const struct { int x, y; uint16_t c; } marks[] = {
+        { 0, 0, 0xf800u }, { 359, 0, 0x07e0u }, { 0, 359, 0x001fu },
+        { 359, 359, 0xffe0u }, { 180, 0, 0xf81fu },
+    };
+    toy_fb_clear(fb, 0x0000u);
+    for (size_t k = 0; k < sizeof marks / sizeof marks[0]; k++)
+        toy_fb_px(fb, marks[k].x, marks[k].y, marks[k].c);
+    for (int q = 0; q < 4; q++) {
+        toy_presenter_set_rotation(&presenter, q);
+        flush_capture();
+        check_glass_matches_rot(fb, q);
+        for (size_t k = 0; k < sizeof marks / sizeof marks[0]; k++) {
+            int found = 0, expect = 0, stray = 0;
+            for (int dy = 0; dy < 466; dy++)
+                for (int dx = 0; dx < 466; dx++) {
+                    int sx, sy;
+                    ref_rot_src(fb, q, dx, dy, &sx, &sy);
+                    int in = (sx == marks[k].x && sy == marks[k].y);
+                    if (in)
+                        expect++;
+                    if (glass_px(dx, dy) == marks[k].c) {
+                        found++;
+                        if (!in)
+                            stray++;
+                    }
+                }
+            CHECK(found == expect && stray == 0);
+            CHECK(found >= 1 && found <= 4);
+        }
+    }
+
+    /* Rotated row cache (q=1, column gather): mutate the
+     * source column behind a repeated-key glass-row pair
+     * between flushes; a stale cache would keep the old
+     * column on both rows. */
+    toy_presenter_set_rotation(&presenter, 1);
+    flush_capture();
+    check_glass_matches_rot(fb, 1);
+    int rep_sx = -1;
+    for (int dy = 1; dy < 466 && rep_sx < 0; dy++)
+        if (toy_presenter_rot_cache_key(1, dy, presenter.col_src,
+                                        presenter.row_src, 466) ==
+            toy_presenter_rot_cache_key(1, dy - 1, presenter.col_src,
+                                        presenter.row_src, 466))
+            rep_sx = toy_presenter_rot_cache_key(
+                1, dy, presenter.col_src, presenter.row_src, 466);
+    CHECK(rep_sx >= 0);
+    for (int y = 0; y < 360; y++)
+        fb->px[(size_t)y * 360 + (size_t)rep_sx] = 0x07ffu;
+    flush_capture();
+    check_glass_matches_rot(fb, 1);
+
+    /* FULL466 rotation math: identity maps + 466-wide fb via
+     * the pure builder (the exact path rotated FULL466 flush
+     * streams). q=0 must be the verbatim fb; all quadrants
+     * must equal rot_src sampling pixel-for-pixel. */
+    {
+        uint16_t idmap[466];
+        toy_presenter_build_map(idmap, 466, 466);
+        uint16_t *big =
+            (uint16_t *)malloc((size_t)466 * 466 * sizeof(uint16_t));
+        CHECK(big != NULL);
+        if (big) {
+            for (int y = 0; y < 466; y++)
+                for (int x = 0; x < 466; x++)
+                    big[(size_t)y * 466 + (size_t)x] =
+                        (uint16_t)((unsigned)(x + 1) * 251u ^
+                                   (unsigned)(y + 1) * 40503u);
+            uint16_t row[466];
+            for (int q = 0; q < 4; q++) {
+                int bad = 0;
+                for (int dy = 0; dy < 466 && !bad; dy++) {
+                    toy_presenter_build_glass_row(big, 466, idmap,
+                                                  idmap, q, dy, row,
+                                                  466);
+                    for (int dx = 0; dx < 466; dx++) {
+                        int sx, sy;
+                        toy_presenter_rot_src(q, dx, dy, idmap, idmap,
+                                              466, &sx, &sy);
+                        /* Independent: identity maps => source
+                         * IS the inverse-rotated point. */
+                        int ex, ey;
+                        ref_inv_point(q, dx, dy, 466, &ex, &ey);
+                        if (sx != ex || sy != ey ||
+                            row[dx] != big[(size_t)ey * 466 + (size_t)ex])
+                            bad = 1;
+                        if (q == 0 &&
+                            row[dx] != big[(size_t)dy * 466 + (size_t)dx])
+                            bad = 1;
+                    }
+                }
+                CHECK(!bad);
+            }
+            free(big);
+        }
+    }
+
+    toy_presenter_set_rotation(&presenter, 0);
+}
+
 int main(void)
 {
     test_src_coord();
@@ -428,6 +661,7 @@ int main(void)
     test_persistence();
     test_cart_sequence("harmonograph", 30, 1);
     test_cart_sequence("fig8", 10, 0);
+    test_rotation();
     if (failures) {
         printf("presenter_test: FAIL (%d failures)\n", failures);
         return EXIT_FAILURE;
