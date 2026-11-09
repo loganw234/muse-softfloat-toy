@@ -42,9 +42,9 @@ static int checks = 0;
 
 static void test_constants_and_save_decision(void)
 {
-    CHECK(TOY_PROD_CKPT_SECONDS == 30u,
-          "default cadence is the named 30 s constant");
-    CHECK(TOY_PROD_CKPT_INTERVAL_MS == 30000ull,
+    CHECK(TOY_PROD_CKPT_SECONDS == 300u,
+          "default cadence is the owner-decided 300 s constant");
+    CHECK(TOY_PROD_CKPT_INTERVAL_MS == 300000ull,
           "interval ms derives from the seconds constant");
 
     CHECK(toy_prod_ckpt_save_decision(TOY_LIVE_FEED_NONE) ==

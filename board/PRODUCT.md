@@ -229,7 +229,7 @@ silent.
   program runs with XIP down, placed after a frame's
   flush and before the next step, and the measured stall
   is printed (`… saved … ms=<n>`; expect a visible pause
-  about that long every 30 s — typ. hundreds of ms,
+  about that long every 5 min — typ. hundreds of ms,
   dominated by 17 sector erases; the line is the
   measurement, trust it over this sentence). Touch input
   during the stall is not lost: interrupts are masked by
@@ -376,7 +376,7 @@ this itself, no owner action:
 | `TOY-PROD-FEED cart=… src=synthetic-fallback reason=imu-down\|no-live-device …` | at a feed cart's start: no live source, the synthetic scenario runs instead (on-glass label agrees) |
 | `TOY-PROD-FEED cart=… src=live fresh=… rep=… err=… max_age_ms=… fresh_hz_x10=… cons_hz_x10=… spec_hz=… warp_x100=…` | 1 Hz while a LIVE cart runs: new vs hold-repeated samples fed, read errors, oldest held sample fed, achieved fresh rate and consumption rate vs spec, cart-time warp (100 = wall rate) |
 | `TOY-PROD-FEED cart=… src=synthetic-resume step=… seek_samples=…` | boot resumed a synthetic feed cart: source respawned and seeked to `step × samples_per_step`; the run stays synthetic until relaunched |
-| `TOY-PROD-CKPT layout slots=2 slot_bytes=69632 base=0x… flash_bytes=… cadence_s=30` | boot: resolved A/B slot placement at the end of `PICO_FLASH_SIZE_BYTES` + the compiled save cadence |
+| `TOY-PROD-CKPT layout slots=2 slot_bytes=69632 base=0x… flash_bytes=… cadence_s=300` | boot: resolved A/B slot placement at the end of `PICO_FLASH_SIZE_BYTES` + the compiled save cadence |
 | `TOY-PROD-CKPT saved cart=… step=… slot=0\|1 bytes=… ms=… why=cadence\|exit` | a checkpoint landed (slots alternate); `ms` is the measured between-frames flash stall; `bytes` is the TOYCKPT1 image size |
 | `TOY-PROD-CKPT cleared cart=… ms=… why=fresh-start` | a fresh launch retired the previous run's checkpoints (both slots erased before step 0) |
 | `TOY-PROD-CKPT skip-live cart=… why=…` | once per LIVE feed run: not checkpointing (live position not reconstructible); cadence/exit saves are skipped for the whole run |
@@ -457,7 +457,7 @@ backwards; each is a one-define flip, deliberately.
 
 9. **Power-cut resume (toy5-flashprod).** Launch
    **fig8**, watch for `TOY-PROD-CKPT saved … slot=0 …
-   why=cadence` after ~30 s (note the `ms=` stall and
+   why=cadence` after ~5 min (note the `ms=` stall and
    the brief glass pause), let a second save land in
    `slot=1`, then **pull power mid-run** (ideally right
    as a `saved` line is due — the torn-write case).
@@ -477,7 +477,7 @@ backwards; each is a one-define flip, deliberately.
 11. **Fresh launch retires resume.** Exit any cart
     cleanly (`saved … why=exit`), launch a *different*
     cart (`TOY-PROD-CKPT cleared …`), cut power within
-    its first 30 s: boot must show `TOY-PROD-RESUME none`
+    its first 5 min: boot must show `TOY-PROD-RESUME none`
     and the gallery, not the cart you exited earlier.
 
 ## Known v1 limits
@@ -499,7 +499,7 @@ backwards; each is a one-define flip, deliberately.
   *Live IMU feed* resolves them; one define each).
 - Proof scripts past step 0 never replay on device
   (deliberate; see `main_product.c`).
-- Flash wear at the 30 s cadence is the standing cost of
+- Flash wear at the 300 s cadence is the standing cost of
   resume (see *Flash wear* above): continuous running
   reaches a 100k-cycle sector budget in ≈69 days. Raise
   `TOY_PROD_CKPT_SECONDS` for a leave-it-running piece.
