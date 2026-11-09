@@ -211,11 +211,17 @@ int co5300_set_window(co5300_t *dev, int x0, int y0, int x1, int y1)
 
 /* Convert host-order pixels to wire bytes (high byte first) in
  * fixed chunks and hand them to the sink, inside an already-open
- * pixel stream. Chunk boundaries are invisible on the wire. */
+ * pixel stream. Chunk boundaries are invisible on the wire. The
+ * chunk is 512 bytes (256 pixels) since toy5-flush: 4x fewer
+ * sink calls per frame than the original 128 (932 vs 3,728 for
+ * the presenter's 932-byte rows) for 384 extra stack bytes,
+ * which the product's
+ * 4 KiB reserved stack absorbs without coming close (this is
+ * the deepest buffer on the flush call chain). */
 static void send_pixels(co5300_t *dev, const uint16_t *pixels,
                         size_t count)
 {
-    uint8_t chunk[128];
+    uint8_t chunk[512];
     size_t done = 0;
     while (done < count) {
         size_t npx = count - done;

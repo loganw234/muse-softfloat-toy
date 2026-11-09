@@ -17,6 +17,7 @@
 #ifndef DISPLAY_QSPI_PIO_H
 #define DISPLAY_QSPI_PIO_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 #include "display_co5300.h"
@@ -53,11 +54,101 @@
  * display test simply runs at the faster rate. */
 #define DISPLAY_QSPI_SCL_HZ 50000000u
 
+/* Word packing for the PIO TX feed (toy5-flush). The state
+ * machine shifts its OSR left, MSB first, with autopull at 32
+ * bits, so one 32-bit FIFO word carries FOUR wire bytes -
+ * bytes[0] in bits 31..24 down to bytes[3] in bits 7..0 - and
+ * the nibble sequence on the pins (each byte high nibble
+ * first) is exactly the sequence the pre-packing feed produced
+ * with one byte per word in bits 31..24 and autopull at 8.
+ * The PIO program itself is unchanged.
+ *
+ * The packer sits below the co5300_sink_t byte seam: cmd and
+ * pixel byte calls of ANY length feed through it in order,
+ * and a partial word (1..3 bytes) is carried across calls,
+ * because chunk boundaries are invisible on the wire. What is
+ * still pending when CS is released is emitted by the
+ * transport as one final short word (its bytes in the top of
+ * pack.word, zeros below, consumed bits = 8 * pack.len) - see
+ * flush_pack_tail in display_qspi_pio.c. Pure and
+ * host-compilable: tools/display_qspi_pack_test.c pins the
+ * exact word sequences, including every tail length. */
+typedef struct {
+    uint32_t word; /* pending bytes, MSB-first, zeros below */
+    uint8_t len;   /* pending byte count, 0..3 */
+} display_qspi_pack_t;
+
+static inline void display_qspi_pack_reset(display_qspi_pack_t *p)
+{
+    p->word = 0;
+    p->len = 0;
+}
+
+/* Pack exactly four wire bytes into one FIFO word. */
+static inline uint32_t display_qspi_pack_word4(const uint8_t *b)
+{
+    return ((uint32_t)b[0] << 24) | ((uint32_t)b[1] << 16) |
+           ((uint32_t)b[2] << 8) | (uint32_t)b[3];
+}
+
+/* Append one byte. Returns 1 (and writes *word_out, resetting
+ * the packer) when that byte completes a 4-byte word. */
+static inline int display_qspi_pack_push(display_qspi_pack_t *p,
+                                         uint8_t byte,
+                                         uint32_t *word_out)
+{
+    p->word |= (uint32_t)byte << (24u - 8u * p->len);
+    p->len++;
+    if (p->len < 4)
+        return 0;
+    *word_out = p->word;
+    display_qspi_pack_reset(p);
+    return 1;
+}
+
+/* Bits of pack.word that are real wire bytes, for the final
+ * short-word flush: 0, 8, 16 or 24. */
+static inline uint32_t
+display_qspi_pack_tail_bits(const display_qspi_pack_t *p)
+{
+    return (uint32_t)p->len * 8u;
+}
+
+typedef void (*display_qspi_put_word_fn)(void *ctx, uint32_t word);
+
+/* Feed len wire bytes through the packer, emitting each
+ * completed word via put_word. With no partial word pending
+ * the body packs four bytes at a time; a pending partial is
+ * topped up byte-wise first, and a 1..3 byte remainder is left
+ * pending for the next call (or the CS-release tail flush).
+ * This is the exact algorithm the PIO sink runs; the host
+ * test drives it with a capturing put_word. */
+static inline void display_qspi_pack_feed(display_qspi_pack_t *p,
+                                          const uint8_t *bytes,
+                                          size_t len,
+                                          display_qspi_put_word_fn put_word,
+                                          void *ctx)
+{
+    size_t i = 0;
+    while (i < len) {
+        if (p->len == 0 && len - i >= 4) {
+            put_word(ctx, display_qspi_pack_word4(bytes + i));
+            i += 4;
+        } else {
+            uint32_t word;
+            if (display_qspi_pack_push(p, bytes[i], &word))
+                put_word(ctx, word);
+            i++;
+        }
+    }
+}
+
 typedef struct display_qspi display_qspi_t;
 struct display_qspi {
     void *pio; /* PIO instance (hardware/pio.h PIO), kept opaque here */
     int sm;
     uint32_t scl_hz; /* actual SCL rate after divider rounding */
+    display_qspi_pack_t pack; /* wire bytes not yet a full FIFO word */
 };
 
 /* Claim a PIO state machine, drive pins, start the transmitter.
