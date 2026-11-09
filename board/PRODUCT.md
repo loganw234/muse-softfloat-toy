@@ -8,17 +8,24 @@ toy5-presenter attract rotation (not retained; see
 `main_product.c` header). The four IMU feed carts run on
 the real QMI8658 when it is up (toy5-livefeed; see *Live
 IMU feed* below) and fall back loudly to their synthetic
-scenarios when it is not.
+scenarios when it is not. A running cart checkpoints to
+internal flash every 5 min and on clean exit, and boot
+auto-resumes the newest checkpoint (toy5-flashprod; see
+*Flash checkpoints + boot resume* below — read the wear
+numbers there before leaving a cart running 24/7).
 
 | File | Contents |
 |---|---|
 | `main_product.c` | Boot + shell runner loop (event funnel, time-boxed stepper, presenter flush) |
 | `product_input.h` | Pure seams: touch mapping, gesture machine, tilt gate, dial accumulator, still calibration |
 | `live_feed.h` | Pure live-feed seam: sensor->synthetic axis transform, latest-sample hold + counters, source selection, LIVE info |
+| `product_ckpt.h` | Pure checkpoint-policy seam: `TOY_PROD_CKPT_SECONDS` cadence timer, skip-live decision, boot-resume decision over slot scan × registry |
+| `ckpt_flash.{c,h}` | Internal-flash A/B slot backend over `flash_safe_execute` (shared with `toy_board`, which links but never calls it) |
 | `clock_rtc.{c,h}` | `toy_clock.h` over the PCF85063 (toy_product only; `toy_board` keeps `clock_board.c`) |
 | `clock_civil.h` | Pure civil <-> epoch conversions, clock-commit combiner, tz RAM-byte encoding |
 | `../tools/product_input_test.c` | Host test for both pure headers (163 checks) |
 | `../tools/live_feed_test.c` | Host test for `live_feed.h` + the core LIVE labelling path (45 checks; link line in its header) |
+| `../tools/prod_ckpt_test.c` | Host test for `product_ckpt.h` (29 checks; slot selection itself stays pinned by `../tools/flashslot_test.c`) |
 
 ## Boot sequence
 
@@ -38,7 +45,12 @@ scenarios when it is not.
      `TOY-PROD-CAL ok bias_mdps=<n>` or `skipped` (bias 0).
      Leave the board flat and untouched through boot if you
      want the dial zeroed.
-4. Shell init over the full cart registry, **GALLERY first**.
+4. Shell init over the full cart registry, **GALLERY
+   first** — then the boot-resume scan: if internal flash
+   holds a valid checkpoint for a registered cart, that
+   cart auto-starts from where power left it
+   (`TOY-PROD-RESUME …`); otherwise the gallery stays up
+   (see *Flash checkpoints + boot resume*).
 
 ## Controls map
 
@@ -161,9 +173,13 @@ proof-strict; the live runner fills frames itself in
   each, same ritual as the tilt signs).
 - **No checkpoints of live runs.** A live stream cannot
   be rebuilt from a step count, and core refuses it; the
-  product firmware never attempts it (it makes no
-  checkpoint/bank calls at all). Proof hashes are
-  synthetic-only everywhere, unchanged.
+  product skips checkpointing LIVE runs entirely (one
+  `TOY-PROD-CKPT skip-live` line per run — so a power cut
+  during a live feed cart boots to whatever older
+  checkpoint exists, usually the gallery). Synthetic
+  feed runs checkpoint and resume normally (next
+  section). Proof hashes are synthetic-only everywhere,
+  unchanged.
 
 ### Heartbeat chest test (owner)
 
@@ -185,6 +201,96 @@ on a table, tap the table — the detector should tick.
 Serial `fresh_hz_x10` tells you the real sampling you
 got; anything under ~15 Hz fresh will mostly show
 breathing and motion, not a clean pulse train.
+
+## Flash checkpoints + boot resume (toy5-flashprod)
+
+The desk-toy behaviour: cut power mid-cart, restore it,
+and the toy comes back running that cart from (at most
+one cadence before) where it was. All of it is on serial
+as `TOY-PROD-CKPT` / `TOY-PROD-RESUME` lines; nothing is
+silent.
+
+- **When it saves.** While a cart is RUNNING, every
+  `TOY_PROD_CKPT_SECONDS` (**300 s**, the named constant in
+  `board/product_ckpt.h`) of wall time, plus once on
+  clean exit-to-gallery. Nothing saves from the gallery,
+  settings (sim paused, state frozen), or clock face.
+  LIVE feed carts never save (previous section);
+  synthetic feed carts and all non-feed carts do.
+- **Where, and why a power cut is safe.** Two slots of
+  69,632 B (17 × 4 KiB sectors) at the end of the 4 MiB
+  `PICO_FLASH_SIZE_BYTES` region (`base=0x3de000` on this
+  build; the boot `TOY-PROD-CKPT layout` line prints the
+  resolved numbers). Each save erases + programs the slot
+  that is **not** the newest valid one and read-back
+  verifies it — cut power at any instant and the previous
+  checkpoint is still intact and still wins the next
+  boot's scan. A save stalls the glass once: the erase +
+  program runs with XIP down, placed after a frame's
+  flush and before the next step, and the measured stall
+  is printed (`… saved … ms=<n>`; expect a visible pause
+  about that long every 30 s — typ. hundreds of ms,
+  dominated by 17 sector erases; the line is the
+  measurement, trust it over this sentence). Touch input
+  during the stall is not lost: interrupts are masked by
+  the SDK's flash-safe path, so an edge just lands late.
+- **Boot resume.** After shell init, the newest slot that
+  fully validates (both CRCs + state hash) and names a
+  still-registered cart auto-starts that cart from the
+  saved bytes — parameters included, they ride inside the
+  state. A resumed synthetic feed cart stays **synthetic
+  for that whole run** (its source is respawned and
+  seeked to the saved step count; `src=synthetic-resume`)
+  even if the IMU is up; exit and relaunch to go live.
+  Anything wrong — torn/corrupt image, cart renamed or
+  removed by newer firmware — boots to the gallery with
+  a `TOY-PROD-RESUME-ERR` line naming the stage.
+- **Launching a cart retires the old checkpoint.** Any
+  fresh gallery launch (or staged-parameters restart)
+  erases both slots first (`TOY-PROD-CKPT cleared …
+  why=fresh-start`). That is what keeps boot's "newest =
+  highest step count" honest: step counts restart at 0
+  per launch and mean nothing across runs, so the slots
+  only ever hold the current run's images. Deliberate
+  consequence: launch a cart for two seconds and cut
+  power before its first save, and the toy boots to the
+  gallery — the previous cart's resume was retired when
+  you launched.
+- **Single-core bound.** The flash writes assume core 1
+  never runs (`PICO_FLASH_ASSUME_CORE1_SAFE`, same as the
+  proof firmware). A future multi-core product must
+  revisit this before shipping (drop the define, add the
+  core-1 lockout victim; `ckpt_flash.h` states it).
+
+### Flash wear: the honest arithmetic
+
+NOR flash wears per sector erase. Every save erases one
+whole slot (17 sectors, one cycle each) and saves
+alternate slots, so at a 30 s cadence a cart running
+**continuously** produces 86,400 / 30 = **2,880 saves a
+day across the pair = 1,440 erase cycles per sector per
+day**. Against the 100,000-cycle minimum endurance
+typical of W25Q-class parts (the module vendor's exact
+figure is not recorded in this tree — if it is a
+10,000-cycle part, divide everything by ten):
+
+| Cart actually running | Cycles/sector/day | Time to 100k cycles |
+|---|---|---|
+| 24 h/day | 1,440 | **≈ 69 days** |
+| 8 h/day | 480 | ≈ 208 days |
+| 2 h/day | 120 | ≈ 2.3 years |
+| 1 h/day | 60 | ≈ 4.6 years |
+| 15 min/day | 15 | ≈ 18 years |
+
+That arithmetic is why the shipped default is the
+owner-chosen `TOY_PROD_CKPT_SECONDS 300` (2026-11-07):
+every row above stretches ×10 (24/7 → ≈1.9 years) at
+the cost of resuming up to 5 minutes back after a
+power cut. Clean exits save once and launches
+erase once; both are human-cadence and negligible
+against the cadence term. Nothing
+saves while the toy sits in the gallery or on the clock
+face, so idle-on-desk time costs no cycles at all.
 
 ## The clock
 
@@ -253,7 +359,7 @@ this itself, no owner action:
 
 | Marker | Meaning |
 |---|---|
-| `TOY-PROD-BOOT / -PRESENTER / -MEM` | banner, fb mode, linked-layout memory evidence |
+| `TOY-PROD-BOOT / -PRESENTER / -MEM` | banner, fb mode, linked-layout memory evidence (`-MEM` now also prints `ckpt_buf_bytes=65600`, the static SRAM checkpoint image buffer) |
 | `TOY-PROD-INIT rc=` | panel init result |
 | `TOY-PROD-RTC ok valid=… tz=… tz_src=…` | wall clock state at boot (`-RTC-ERR` if the chip is unreachable) |
 | `TOY-PROD-TOUCH ok chip=… mirror=1 … irq=edge-fall-latched` | touch up, INT edges latched by IRQ (`-TOUCH-ERR rc=` otherwise; runtime read errors reprint at counts 1, 100, …) |
@@ -261,7 +367,7 @@ this itself, no owner action:
 | `TOY-PROD-IMU ok …` / `TOY-PROD-CAL ok bias_mdps=…` or `skipped` | IMU up; dial zero accepted or declined |
 | `TOY-PROD-SHELL carts=… touch=… imu=…` | shell live, which senses survived |
 | `TOY-PROD-EVENT screen=<name> cart=<name>` | every screen change |
-| `TOY-PROD-EVENT start cart=… params=… hash=…` | cart reset + step-0 params applied; hash is the post-setup state |
+| `TOY-PROD-EVENT start cart=… params=… hash=…` | cart reset + step-0 params applied; hash is the post-setup state (a boot-resumed start reads `resumed=1` instead of `params=…`; hash is the restored state) |
 | `TOY-PROD-EVENT params-queued n=…` | live setting edits queued for the next step boundary |
 | `TOY-PROD-EVENT exit cart=… why=…` | cart stopped (`shell-exit`, `sig-feed-error`) |
 | `TOY-PROD-EVENT clock-commit local=hh:mm tz=… utc=… date_src=… ok=…` | a CLOCK SET commit and its fate |
@@ -269,6 +375,15 @@ this itself, no owner action:
 | `TOY-PROD-FEED cart=… src=live odr_hz=125 spec_hz=… sps=… stream=…` | at a feed cart's start: it is on the real IMU; `stream` is the LIVE parameter hash stamped into cart state |
 | `TOY-PROD-FEED cart=… src=synthetic-fallback reason=imu-down\|no-live-device …` | at a feed cart's start: no live source, the synthetic scenario runs instead (on-glass label agrees) |
 | `TOY-PROD-FEED cart=… src=live fresh=… rep=… err=… max_age_ms=… fresh_hz_x10=… cons_hz_x10=… spec_hz=… warp_x100=…` | 1 Hz while a LIVE cart runs: new vs hold-repeated samples fed, read errors, oldest held sample fed, achieved fresh rate and consumption rate vs spec, cart-time warp (100 = wall rate) |
+| `TOY-PROD-FEED cart=… src=synthetic-resume step=… seek_samples=…` | boot resumed a synthetic feed cart: source respawned and seeked to `step × samples_per_step`; the run stays synthetic until relaunched |
+| `TOY-PROD-CKPT layout slots=2 slot_bytes=69632 base=0x… flash_bytes=… cadence_s=30` | boot: resolved A/B slot placement at the end of `PICO_FLASH_SIZE_BYTES` + the compiled save cadence |
+| `TOY-PROD-CKPT saved cart=… step=… slot=0\|1 bytes=… ms=… why=cadence\|exit` | a checkpoint landed (slots alternate); `ms` is the measured between-frames flash stall; `bytes` is the TOYCKPT1 image size |
+| `TOY-PROD-CKPT cleared cart=… ms=… why=fresh-start` | a fresh launch retired the previous run's checkpoints (both slots erased before step 0) |
+| `TOY-PROD-CKPT skip-live cart=… why=…` | once per LIVE feed run: not checkpointing (live position not reconstructible); cadence/exit saves are skipped for the whole run |
+| `TOY-PROD-CKPT-ERR cart=… stage=serialize\|write\|clear …` | a save/clear failed (serialize `err=`, flash `err=` + SDK `safe_rc=`); the run continues and the next attempt is a full cadence out — a surviving older slot is still resumable |
+| `TOY-PROD-RESUME cart=… step=… slot=…` | boot auto-started the newest valid checkpoint's cart at its saved step |
+| `TOY-PROD-RESUME none (gallery)` | boot: both slots blank (first boot, or a fresh launch was the last flash write) |
+| `TOY-PROD-RESUME-ERR … (gallery)` | boot resume declined: `cart=<n> not-in-registry`, `no-valid-checkpoint` (torn/corrupt only), or `stage=read\|sig-init\|seek\|load\|launch` with the failing stage named |
 | `TOY-PROD-FLUSH-ERR / -SIG-ERR / -BAD-CART` | presenter/feed/descriptor failures; the toy degrades to the gallery instead of wedging |
 | `TOY-PROD-BUS-RECOVER begin n=… consec=… touch_err=… imu_err=…` | shared-bus reset starting (n = attempts so far incl. this one, consec = consecutive transport errors that triggered it) |
 | `TOY-PROD-BUS-RECOVER done n=… ok=… sda=… scl=… clocks=… touch=… imu=… rtc=… (expected t=… i=… r=…)` | reset outcome: `sda/scl` = line levels found after deinit (0 = held low), `clocks` = SCL pulses until SDA released, per-device live flags after re-probe, `expected` = healthy-at-boot set. `ok=1` = a probe read proved the bus alive |
@@ -340,6 +455,31 @@ Report back the three orientation verdicts (dial, touch
 mirror, tilt axes) plus anything that feels laggy or
 backwards; each is a one-define flip, deliberately.
 
+9. **Power-cut resume (toy5-flashprod).** Launch
+   **fig8**, watch for `TOY-PROD-CKPT saved … slot=0 …
+   why=cadence` after ~30 s (note the `ms=` stall and
+   the brief glass pause), let a second save land in
+   `slot=1`, then **pull power mid-run** (ideally right
+   as a `saved` line is due — the torn-write case).
+   Restore power: expect `TOY-PROD-RESUME cart=fig8
+   step=<n> slot=<s>` and fig8 running again from about
+   the last `saved` step — never a half state. Repeat
+   with an unclean cut *during* a save if you can time
+   it: the older slot must win.
+10. **Live carts don't save; synthetic resume.**
+    Launch **gpend** with the IMU up: expect exactly one
+    `TOY-PROD-CKPT skip-live` line and no `saved` lines;
+    power-cut boots back to the gallery (or an older
+    cart's checkpoint). For the synthetic path the lead
+    can name a fallback condition; a resumed feed cart
+    prints `src=synthetic-resume` and its label stays
+    `SYNTHETIC`.
+11. **Fresh launch retires resume.** Exit any cart
+    cleanly (`saved … why=exit`), launch a *different*
+    cart (`TOY-PROD-CKPT cleared …`), cut power within
+    its first 30 s: boot must show `TOY-PROD-RESUME none`
+    and the gallery, not the cart you exited earlier.
+
 ## Known v1 limits
 
 - Orientation signs above are vendor/geometry-derived, not
@@ -359,3 +499,18 @@ backwards; each is a one-define flip, deliberately.
   *Live IMU feed* resolves them; one define each).
 - Proof scripts past step 0 never replay on device
   (deliberate; see `main_product.c`).
+- Flash wear at the 30 s cadence is the standing cost of
+  resume (see *Flash wear* above): continuous running
+  reaches a 100k-cycle sector budget in ≈69 days. Raise
+  `TOY_PROD_CKPT_SECONDS` for a leave-it-running piece.
+- Flash checkpoints are single-core only
+  (`PICO_FLASH_ASSUME_CORE1_SAFE`); a core-1 product
+  must rework the safe-execute setup first.
+- After a boot resume, the SETTINGS editor still seeds
+  from parameter *defaults* while the running state
+  carries the checkpoint's values; untouched parameters
+  are never re-queued, but the editor's initial readouts
+  can differ from the live values until first edited.
+- A resumed synthetic feed cart cannot become LIVE
+  mid-run (exit + relaunch), and a LIVE run leaves no
+  checkpoint at all (both deliberate; see above).

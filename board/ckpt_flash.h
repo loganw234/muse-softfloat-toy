@@ -6,11 +6,14 @@
  * newest valid image wins. Checkpoint banks/history belong on
  * the RP2350 kit's microSD, not here (study-checkpoint.md 5.2).
  *
- * NOT wired into main_board.c behaviour: nothing here runs at
- * boot, no slot is read or written by the proof firmware, and
- * the API is linked only so Friday's wiring is a call, not a
- * build change. Compile-proven on RP2040 + RP2350; the first
- * on-device write/read proof is Friday's checklist item.
+ * NOT wired into main_board.c behaviour: no slot is read or
+ * written by the proof firmware (the API is rooted there
+ * only so it stays linked, board/CMakeLists.txt). The
+ * product firmware (main_product.c, toy5-flashprod) is the
+ * caller: cadence + exit saves through write_next, boot
+ * resume through the slot scan + read_slot. Compile-proven
+ * on RP2040 + RP2350; the first on-device write/read proof
+ * is the lead's flash of toy_product (owner power-cuts).
  *
  * Flash-size source: PICO_FLASH_SIZE_BYTES from the board header
  * (pico: 2 MiB; pico2: 4 MiB assumed - the 16 MiB module slot
@@ -36,11 +39,11 @@
  *
  * Selftest: TOY_CKPT_FLASH_SELFTEST (CMake option, OFF by
  * default) compiles toy_ckpt_flash_selftest_roundtrip() as a
- * callable one-shot. Nothing calls it even then - Friday's
- * wiring adds a deliberate boot-time call in a throwaway build.
- * Default OFF because a boot-time write on every power-up would
- * burn erase cycles for no product reason and would destroy a
- * real resume slot if ever shipped by accident.
+ * callable one-shot. Nothing calls it in any shipped target
+ * (toy_product never defines it). Default OFF because a
+ * boot-time write on every power-up would burn erase cycles
+ * for no product reason and would destroy a real resume
+ * slot if ever shipped by accident.
  */
 #ifndef TOY_CKPT_FLASH_H
 #define TOY_CKPT_FLASH_H
