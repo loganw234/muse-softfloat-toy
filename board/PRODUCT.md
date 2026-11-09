@@ -9,7 +9,7 @@ toy5-presenter attract rotation (not retained; see
 the real QMI8658 when it is up (toy5-livefeed; see *Live
 IMU feed* below) and fall back loudly to their synthetic
 scenarios when it is not. A running cart checkpoints to
-internal flash every 30 s and on clean exit, and boot
+internal flash every 5 min and on clean exit, and boot
 auto-resumes the newest checkpoint (toy5-flashprod; see
 *Flash checkpoints + boot resume* below — read the wear
 numbers there before leaving a cart running 24/7).
@@ -211,7 +211,7 @@ as `TOY-PROD-CKPT` / `TOY-PROD-RESUME` lines; nothing is
 silent.
 
 - **When it saves.** While a cart is RUNNING, every
-  `TOY_PROD_CKPT_SECONDS` (**30 s**, the named constant in
+  `TOY_PROD_CKPT_SECONDS` (**300 s**, the named constant in
   `board/product_ckpt.h`) of wall time, plus once on
   clean exit-to-gallery. Nothing saves from the gallery,
   settings (sim paused, state frozen), or clock face.
@@ -266,7 +266,7 @@ silent.
 
 NOR flash wears per sector erase. Every save erases one
 whole slot (17 sectors, one cycle each) and saves
-alternate slots, so at the 30 s default a cart running
+alternate slots, so at a 30 s cadence a cart running
 **continuously** produces 86,400 / 30 = **2,880 saves a
 day across the pair = 1,440 erase cycles per sector per
 day**. Against the 100,000-cycle minimum endurance
@@ -282,13 +282,11 @@ figure is not recorded in this tree — if it is a
 | 1 h/day | 60 | ≈ 4.6 years |
 | 15 min/day | 15 | ≈ 18 years |
 
-That is the real trade behind the 30 s default: it buys
-lose-at-most-30 s-of-play after a power cut, and it is
-fine for a toy that runs in sittings — it is **not** free
-for a leave-it-running-forever desk piece. The lever is
-one constant: `TOY_PROD_CKPT_SECONDS 300` stretches every
-row ×10 (24/7 → ≈1.9 years) at the cost of resuming up
-to 5 minutes back. Clean exits save once and launches
+That arithmetic is why the shipped default is the
+owner-chosen `TOY_PROD_CKPT_SECONDS 300` (2026-11-07):
+every row above stretches ×10 (24/7 → ≈1.9 years) at
+the cost of resuming up to 5 minutes back after a
+power cut. Clean exits save once and launches
 erase once; both are human-cadence and negligible
 against the cadence term. Nothing
 saves while the toy sits in the gallery or on the clock

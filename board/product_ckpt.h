@@ -72,7 +72,7 @@
 /* --- cadence ---------------------------------------------------- */
 
 #ifndef TOY_PROD_CKPT_SECONDS
-#define TOY_PROD_CKPT_SECONDS 30u
+#define TOY_PROD_CKPT_SECONDS 300u /* owner wear decision 2026-11-07: 5 min */
 #endif
 #define TOY_PROD_CKPT_INTERVAL_MS \
     ((uint64_t)TOY_PROD_CKPT_SECONDS * 1000ull)
