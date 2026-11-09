@@ -187,6 +187,40 @@ static uint16_t fade_colour(unsigned p, unsigned fade)
                       (((p & 31u) * fade) >> 8));
 }
 
+/* Exact floor(sqrt(v)) for v >= 0 (bit method, long math so
+ * no intermediate overflows for any int v). */
+static int at_isqrt(int v)
+{
+    long vv = v, r = 0, bit = 1L << 30;
+    while (bit > vv) bit >>= 2;
+    while (bit) {
+        if (vv >= r + bit) { vv -= r + bit; r = (r >> 1) + bit; }
+        else r >>= 1;
+        bit >>= 2;
+    }
+    return (int)r;
+}
+
+/* The sky/ground split test, the original expression on the
+ * original operands. */
+static int at_is_ground(int x, int y, double ux, double uy)
+{
+    return (double)x * ux + (double)y * uy > 0.0;
+}
+
+/* Fill relative span x0..x1 on absolute row py under the same
+ * [0,w) x [0,h) clip toy_fb_px applies per pixel. */
+static void at_span(toy_fb_t *fb, int cx, int py, int x0, int x1,
+                    uint16_t c)
+{
+    if ((unsigned)py >= (unsigned)fb->h) return;
+    int ax0 = cx + x0, ax1 = cx + x1;
+    if (ax0 < 0) ax0 = 0;
+    if (ax1 > fb->w - 1) ax1 = fb->w - 1;
+    uint16_t *row = fb->px + (size_t)py * (size_t)fb->w;
+    for (int x = ax0; x <= ax1; x++) row[x] = c;
+}
+
 static void attitude_render(const void *st_, toy_fb_t *fb)
 {
     const attitude_state *s = (const attitude_state *)st_;
@@ -207,15 +241,51 @@ static void attitude_render(const void *st_, toy_fb_t *fb)
     double ux = 0.0, uy = 0.0; /* unit down, screen coords */
     if (split) { ux = gx / tilt; uy = -gy / tilt; }
 
-    /* Sky/ground fill, then the horizon line itself. */
+    /* Sky/ground fill, then the horizon line itself.
+     * Cost shape (toy5-render, pixel-identical): each row is
+     * clipped to the disc by exact integer sqrt (the same
+     * x*x + y*y <= rd*rd set the square scan tested), and the
+     * split test - this frame's soft-double bulk on target,
+     * ~50k dot products at 360 - is evaluated only to binary-
+     * search each row's sky/ground edge (~8 evaluations/row).
+     * For fixed y the tested value is non-decreasing in x
+     * when ux > 0: the exact products (double)x * ux increase
+     * with x, IEEE rounding is monotone, and adding the row
+     * constant (double)y * uy keeps both. Ground pixels are
+     * therefore one suffix of the row (a prefix for ux < 0).
+     * The search evaluates the original predicate itself, so
+     * it only chooses WHICH x to test, never a different
+     * arithmetic. ux == 0 makes the test x-independent
+     * ((double)x * +/-0 is +/-0, and +/-0 + v compares as v -
+     * the +/-0 corner stays not > 0 either way; NaN ux/uy
+     * makes it false everywhere), so one evaluation colours
+     * the row; non-split frames were already one colour. */
     for (int y = -rd; y <= rd; y++) {
-        for (int x = -rd; x <= rd; x++) {
-            if (x * x + y * y > rd * rd) continue;
-            uint16_t c;
-            if (!s->have_grav) c = toy_rgb565(16, 20, 34);
-            else if (!split) c = sky; /* level: no direction to split on */
-            else c = ((double)x * ux + (double)y * uy > 0.0) ? ground : sky;
-            toy_fb_px(fb, cx + x, cy + y, c);
+        int xmax = at_isqrt(rd * rd - y * y);
+        if (!split) {
+            at_span(fb, cx, cy + y, -xmax, xmax,
+                    s->have_grav ? sky : toy_rgb565(16, 20, 34));
+        } else if (ux > 0.0) {
+            int lo = -xmax, hi = xmax, edge = xmax + 1;
+            while (lo <= hi) {
+                int mid = lo + (hi - lo) / 2;
+                if (at_is_ground(mid, y, ux, uy)) { edge = mid; hi = mid - 1; }
+                else lo = mid + 1;
+            }
+            if (edge > -xmax) at_span(fb, cx, cy + y, -xmax, edge - 1, sky);
+            if (edge <= xmax) at_span(fb, cx, cy + y, edge, xmax, ground);
+        } else if (ux < 0.0) {
+            int lo = -xmax, hi = xmax, edge = -xmax - 1;
+            while (lo <= hi) {
+                int mid = lo + (hi - lo) / 2;
+                if (at_is_ground(mid, y, ux, uy)) { edge = mid; lo = mid + 1; }
+                else hi = mid - 1;
+            }
+            if (edge >= -xmax) at_span(fb, cx, cy + y, -xmax, edge, ground);
+            if (edge < xmax) at_span(fb, cx, cy + y, edge + 1, xmax, sky);
+        } else {
+            at_span(fb, cx, cy + y, -xmax, xmax,
+                    at_is_ground(0, y, ux, uy) ? ground : sky);
         }
     }
     if (split) {

@@ -559,6 +559,24 @@ static void sc_center_text(toy_fb_t *fb, int cx, int y, int sc,
     toy_fb_text(fb, cx - (nchars * 4 * sc - sc) / 2, y, sc, col, s);
 }
 
+/* Moon shading for one (|x|, |y|) = (ax, ay) orbit: pixels
+ * (x, +/-ay) for x = ax and (when ax > 0) x = -ax, with nx
+ * the matching +/- na. d and its two tests are the exact
+ * per-pixel expressions; d does not depend on the y sign. */
+static void sc_moon_orbit(toy_fb_t *fb, int mx, int my, int ax, int ay,
+                          double na, double sunx, double base,
+                          uint16_t lit, uint16_t limb)
+{
+    for (int i = 0; i < (ax > 0 ? 2 : 1); i++) {
+        int x = i ? -ax : ax;
+        double d = (i ? -na : na) * sunx + base;
+        if (!(d > 0.0)) continue;
+        uint16_t c = d > 0.25 ? lit : limb;
+        toy_fb_px(fb, mx + x, my + ay, c);
+        if (ay > 0) toy_fb_px(fb, mx + x, my - ay, c);
+    }
+}
+
 static void solclock_render(const void *st_, toy_fb_t *fb)
 {
     const solclock_state *s = (const solclock_state *)st_;
@@ -631,19 +649,40 @@ static void solclock_render(const void *st_, toy_fb_t *fb)
          * beyond the Moon, dark; quarter: sun to the right,
          * the waxing side in the northern sky; full: sun
          * behind the viewer, lit). A point is lit when
-         * n . s > 0. Display geometry only. */
+         * n . s > 0. Display geometry only.
+         *
+         * Cost shape (toy5-render, pixel-identical): rr and
+         * nz depend only on the unordered pair {|x|, |y|} -
+         * fl(nx*nx) is sign-blind and the sum commutes in
+         * IEEE - and fl((-k)/rm) == -fl(k/rm), so each
+         * 24-Newton-iteration sc_dsqrt (a soft-double
+         * division per iteration on the target) is computed
+         * once per unordered pair and shared by its up to 8
+         * symmetric pixels (379 pairs for 2,821 disc pixels
+         * at 360). Every double fed to sc_dsqrt and to the
+         * d > 0 / d > 0.25 tests is bit-for-bit the value
+         * the per-pixel form computed; the pixels are
+         * disjoint, so visit order cannot matter. rm <= 0
+         * (a sub-6px glass) drew nothing in the old form
+         * (0/0 = NaN, NaN > 0 false) and draws nothing here. */
         double sunx = sc_d64(s->moon_sun_x), sunz = sc_d64(s->moon_sun_z);
         uint16_t lit = toy_rgb565(225, 230, 240);
         uint16_t limb = toy_rgb565(150, 160, 185);
-        for (int y = -rm; y <= rm; y++) {
-            for (int x = -rm; x <= rm; x++) {
-                double nx = (double)x / (double)rm;
-                double ny = (double)y / (double)rm;
-                double rr = nx * nx + ny * ny;
-                if (rr > 1.0) continue;
-                double nz = sc_dsqrt(1.0 - rr);
-                double d = nx * sunx + nz * sunz;
-                if (d > 0.0) toy_fb_px(fb, mx + x, my + y, d > 0.25 ? lit : limb);
+        if (rm > 0) {
+            for (int b = 0; b <= rm; b++) {
+                double nb = (double)b / (double)rm;
+                double nb2 = nb * nb;
+                if (nb2 > 1.0) continue; /* rr >= nb2: whole row out */
+                for (int a = 0; a <= b; a++) {
+                    double na = (double)a / (double)rm;
+                    double rr = na * na + nb2;
+                    if (rr > 1.0) continue;
+                    double base = sc_dsqrt(1.0 - rr) * sunz;
+                    sc_moon_orbit(fb, mx, my, a, b, na, sunx, base, lit, limb);
+                    if (a != b)
+                        sc_moon_orbit(fb, mx, my, b, a, nb, sunx, base,
+                                      lit, limb);
+                }
             }
         }
     }
