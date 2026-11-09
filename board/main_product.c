@@ -128,6 +128,23 @@
  * ckpt_flash.h states: PICO_FLASH_ASSUME_CORE1_SAFE, and a
  * future core-1 product must revisit. The proof firmware
  * gains none of this (no product_ckpt include, no calls).
+ *
+ * Gravity-quadrant rotation (toy5-rotate): the same
+ * once-per-frame IMU read also feeds the pure orientation
+ * tracker (board/orientation.h: hysteresis margin + 500 ms
+ * dwell, near-flat keeps the last quadrant, boot quadrant
+ * 0). On a quadrant change the runner sets the presenter's
+ * sampling rotation, resets the tilt gate (carts learn the
+ * new canonical down on the next sample) and prints
+ * TOY-PROD-ORIENT quadrant=<n> - change only, nothing else
+ * on serial. Touch and TILT production use the _rot seams
+ * with the current quadrant identically on shell screens
+ * and RUNNING; the live-feed hold is noted rotated too, so
+ * feed carts' gravity agrees with the picture; DIAL
+ * (screen-normal) is deliberately unchanged. Rotation
+ * lives only in presentation + input production: cart
+ * state, shell state, checkpoints and proof hashes never
+ * see it, and the presenter is not linked by toy_board.
  */
 #include <stdio.h>
 #include <string.h>
@@ -146,6 +163,7 @@
 #include "display_qspi_pio.h"
 #include "imu_qmi8658.h"
 #include "live_feed.h"
+#include "orientation.h"
 #include "presenter.h"
 #include "product_ckpt.h"
 #include "product_input.h"
@@ -259,6 +277,7 @@ static unsigned long pace_frames, pace_steps, pace_seconds;
 static cst9217_config_t touch_cfg;
 static bool touch_ok, imu_ok;
 static toy_prod_gesture_t gesture;
+static toy_orient_t orient; /* gravity quadrant (toy5-rotate) */
 static toy_prod_tilt_gate_t tilt_gate;
 static toy_prod_dial_t dial;
 static toy_prod_tap_launch_t tap_launch;
@@ -818,12 +837,12 @@ static void prod_touchdbg(const char *src, const toy_event_t *ev,
 {
     printf("TOY-PROD-TOUCHDBG src=%s id=%lu raw=(%ld,%ld) "
            "glass=(%ld,%ld) milli=(%ld,%ld) screen=%s act=0x%lx "
-           "mirror=%d irq_edges=%lu\n",
+           "mirror=%d quadrant=%d irq_edges=%lu\n",
            src, (unsigned long)ev->id, (long)raw_x, (long)raw_y,
            (long)toy_prod_touch_axis(raw_x),
            (long)toy_prod_touch_axis(raw_y), (long)ev->x, (long)ev->y,
            screen_name(screen), (unsigned long)act,
-           TOY_PROD_TOUCH_MIRROR, touch_irq_edges);
+           TOY_PROD_TOUCH_MIRROR, orient.quadrant, touch_irq_edges);
 }
 
 /* --- input producers -------------------------------------------- */
@@ -901,9 +920,9 @@ static void prod_touch_poll(uint64_t now_ms)
         }
     }
     toy_event_t out[6];
-    size_t n = toy_prod_gesture_report(
+    size_t n = toy_prod_gesture_report_rot(
         &gesture, now_ms, toy_shell_screen(&shell) == TOY_SHELL_RUNNING,
-        present, px, py, out, 6u);
+        present, px, py, out, 6u, orient.quadrant);
     for (size_t i = 0; i < n; i++) {
         const toy_event_t *ev = &out[i];
         uint8_t pre_screen = toy_shell_screen(&shell);
@@ -956,7 +975,10 @@ static void prod_gesture_poll(uint64_t now_ms)
  * error back-off below and the shared bus-health notes
  * exactly, and adds no transfers of its own. Read errors
  * back off and count (the hold keeps the last good sample
- * and counts the error too). */
+ * and counts the error too). The same sample also drives
+ * the gravity-quadrant tracker (toy5-rotate) BEFORE the
+ * feed/tilt below consume it, so a quadrant change applies
+ * to this very sample and to the frame about to flush. */
 static void prod_imu_poll(uint64_t now_ms)
 {
     if (!imu_ok || now_ms < next_imu_ms)
@@ -982,13 +1004,23 @@ static void prod_imu_poll(uint64_t now_ms)
     }
     last_imu_ms = now_ms;
     have_imu_ms = true;
+    if (toy_orient_update(&orient, m.ax_mg, m.ay_mg, now_ms)) {
+        toy_presenter_set_rotation(&presenter, orient.quadrant);
+        /* Next sample always sends a TILT in the new canonical
+         * frame, even if it lands within 20 mg of the last
+         * sent vector from the old quadrant. */
+        toy_prod_tilt_gate_init(&tilt_gate);
+        printf("TOY-PROD-ORIENT quadrant=%d\n", orient.quadrant);
+    }
     {
         const int16_t raw6[6] = { raw.ax, raw.ay, raw.az,
                                   raw.gx, raw.gy, raw.gz };
-        toy_live_feed_note_sample(&prod_live_feed, raw6, now_ms);
+        toy_live_feed_note_sample_rot(&prod_live_feed, raw6, now_ms,
+                                      orient.quadrant);
     }
     toy_event_t ev;
-    if (toy_prod_tilt_gate_poll(&tilt_gate, now_ms, m.ax_mg, m.ay_mg, &ev))
+    if (toy_prod_tilt_gate_poll_rot(&tilt_gate, now_ms, m.ax_mg, m.ay_mg,
+                                    &ev, orient.quadrant))
         prod_dispatch(&ev);
     if (toy_prod_dial_feed(&dial, m.gz_mdps, dt_ms, &ev))
         prod_dispatch(&ev);
@@ -1466,6 +1498,7 @@ int main(void)
 
     toy_live_feed_init(&prod_live_feed);
     toy_prod_bus_init(&bus_health);
+    toy_orient_init(&orient); /* boot quadrant 0 (toy5-rotate) */
     toy_prod_gesture_init(&gesture);
     toy_prod_tap_launch_init(&tap_launch);
     toy_prod_tilt_gate_init(&tilt_gate);

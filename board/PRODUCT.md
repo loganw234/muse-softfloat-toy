@@ -18,13 +18,14 @@ numbers there before leaving a cart running 24/7).
 |---|---|
 | `main_product.c` | Boot + shell runner loop (event funnel, time-boxed stepper, presenter flush) |
 | `product_input.h` | Pure seams: touch mapping, gesture machine, tilt gate, dial accumulator, still calibration |
+| `orientation.h` | Pure gravity-quadrant tracker (hysteresis + dwell) + the square rotation helpers shared by presenter and input seams (toy5-rotate) |
 | `live_feed.h` | Pure live-feed seam: sensor->synthetic axis transform, latest-sample hold + counters, source selection, LIVE info |
 | `product_ckpt.h` | Pure checkpoint-policy seam: `TOY_PROD_CKPT_SECONDS` cadence timer, skip-live decision, boot-resume decision over slot scan × registry |
 | `ckpt_flash.{c,h}` | Internal-flash A/B slot backend over `flash_safe_execute` (shared with `toy_board`, which links but never calls it) |
 | `clock_rtc.{c,h}` | `toy_clock.h` over the PCF85063 (toy_product only; `toy_board` keeps `clock_board.c`) |
 | `clock_civil.h` | Pure civil <-> epoch conversions, clock-commit combiner, tz RAM-byte encoding |
-| `../tools/product_input_test.c` | Host test for both pure headers (163 checks) |
-| `../tools/live_feed_test.c` | Host test for `live_feed.h` + the core LIVE labelling path (45 checks; link line in its header) |
+| `../tools/product_input_test.c` | Host test for both pure headers + `orientation.h` rotation seams (370 checks) |
+| `../tools/live_feed_test.c` | Host test for `live_feed.h` + the core LIVE labelling path (51 checks; link line in its header) |
 | `../tools/prod_ckpt_test.c` | Host test for `product_ckpt.h` (29 checks; slot selection itself stays pinned by `../tools/flashslot_test.c`) |
 
 ## Boot sequence
@@ -74,8 +75,15 @@ a running cart sees only what the shell forwards.
   footer still launches the selected cart, and the
   SET CLOCK / CLOCK FACE rows and all other screens are
   unchanged (settings keeps its select-then-adjust taps).
+- **Auto-rotation** — turn the device and the picture
+  turns with it (toy5-rotate; next section). Touch and
+  tilt turn together with the picture, in the gallery and
+  in running carts alike.
 - **Tilt** — tipping the board sends milli-g tilt (≥20 mg
-  change, at most every 33 ms) in display space.
+  change, at most every 33 ms) in display space — now the
+  *picture's* display space at any quadrant: tipping the
+  edge that is currently at the bottom of the picture
+  sloshes things toward the picture's bottom.
 - **Dial** — rotating the whole device in its plane sends
   signed milliturns (gyro about the screen normal, still
   bias subtracted, events at ≥25 milliturn = 9°). Clockwise
@@ -104,6 +112,66 @@ Per screen:
 | SETTINGS | tap a row to select; tap the selected row's left/right third to −/+; tap footer to run/resume | adjust selected value | back (to the cart if it was running, else GALLERY) | `*` = staged for next (re)start; live values apply at the next step when resumed |
 | CLOCK SET | tap the HH / MM / UTC-offset zone to pick the field; tap the SET zone to commit; tap the bottom zone to cancel | adjust the picked field (tz in 15-min steps) | cancel | only hh:mm + offset are edited; the date stays whatever the RTC already holds (see clock below) |
 | CLOCK FACE | any tap wakes to GALLERY (or straight to CLOCK SET if the clock is unset) | wakes to GALLERY | — | shows runner wall time; an unset clock shows as unset, never a fake time |
+
+## Gravity-quadrant auto-rotation (toy5-rotate)
+
+Rotating the device to scroll used to feel wrong because
+the picture stayed put while the device turned. Now the
+accelerometer's gravity direction picks a **quadrant** —
+which glass edge is currently "down" — and the picture,
+touch coordinates and cart tilt vectors all rotate
+together by that quadrant. Cartridges and the shell keep
+thinking in the same canonical frame as always; rotation
+exists only where pixels hit the glass (`presenter.c`
+samples the canonical framebuffer through the quadrant)
+and where inputs are produced (`product_input.h` maps
+touch glass pixels and tilt vectors back into canonical
+coords). Cart state, checkpoints and proof hashes never
+see it; the emulator and `toy_board` do not link any of
+this.
+
+- **Quadrant meanings.** `quadrant=0` is the boot and
+  historical orientation (gravity falls toward the glass
+  bottom edge). `1` = device turned 90° clockwise as you
+  look at it (gravity toward the glass *right* edge; the
+  picture's top sits on the glass left edge, which is
+  your top). `2` = upside down. `3` = 90°
+  counter-clockwise. In every quadrant the picture's top
+  is your top, a tap lands on the widget under your
+  finger, and pond/gravity slosh toward the picture's
+  bottom — including the live feed carts (gpend,
+  attitude), whose in-plane sample axes are rotated into
+  picture coords the same way.
+- **How it switches.** A candidate quadrant must win
+  decisively — the in-plane gravity component at least
+  350 mg with the dominant axis beating the other by
+  250 mg — and then persist for **500 ms** before the
+  picture turns (`board/orientation.h`). Diagonal
+  (45°) poses vote for nothing, so easing through a
+  boundary cannot make the picture flap; lying the board
+  flat keeps the last quadrant until a new one dwells in.
+  Turning the device in its plane to scroll (the dial)
+  now carries the picture around the quarter-turn: expect
+  the gallery to turn with you once per quadrant, about
+  half a second after each quarter-turn settles.
+- **Reading it from serial.** Exactly one line per
+  change, nothing per frame: `TOY-PROD-ORIENT quadrant=<n>`.
+  No line at boot (quadrant 0 by definition). Touch debug
+  lines also carry `quadrant=<n>` (`TOY-PROD-TOUCHDBG`),
+  where `milli=` is already in picture coords while
+  `raw=`/`glass=` stay physical — at quadrant ≠ 0 the two
+  legitimately name different corners, related by the
+  rotation; that is the feature working, not a mirror bug
+  (do the mirror corner check at quadrant 0, board held
+  in boot orientation).
+- **Edges.** If the IMU is down the toy stays at
+  quadrant 0 forever (no gravity, no rotation — same as
+  no tilt/dial). A quadrant change *during* a held touch
+  re-interprets that finger's remaining move/up in the new
+  picture orientation; the long-press exit timing is
+  unaffected. The dial (rotation about the screen normal)
+  is deliberately unrotated: clockwise-as-you-see-it stays
+  positive in every quadrant.
 
 ## Live IMU feed (toy5-livefeed)
 
@@ -170,7 +238,9 @@ proof-strict; the live runner fills frames itself in
   gpend's bob or attitude's ball falls the wrong way when
   you tip the board, the fix is `TOY_LIVE_FEED_AX_SIGN` /
   `TOY_LIVE_FEED_AY_SIGN` in `live_feed.h` (one define
-  each, same ritual as the tilt signs).
+  each, same ritual as the tilt signs). The in-plane axes
+  are then rotated into picture coords by the gravity
+  quadrant (toy5-rotate, above), az/gz untouched.
 - **No checkpoints of live runs.** A live stream cannot
   be rebuilt from a step count, and core refuses it; the
   product skips checkpointing LIVE runs entirely (one
@@ -363,8 +433,9 @@ this itself, no owner action:
 | `TOY-PROD-INIT rc=` | panel init result |
 | `TOY-PROD-RTC ok valid=… tz=… tz_src=…` | wall clock state at boot (`-RTC-ERR` if the chip is unreachable) |
 | `TOY-PROD-TOUCH ok chip=… mirror=1 … irq=edge-fall-latched` | touch up, INT edges latched by IRQ (`-TOUCH-ERR rc=` otherwise; runtime read errors reprint at counts 1, 100, …) |
-| `TOY-PROD-TOUCHDBG src=real\|synth-tap id=… raw=(x,y) glass=(x,y) milli=(x,y) screen=… act=0x… mirror=… irq_edges=…` | one line per touch DOWN acted on (never MOVE/UP): `raw` = controller coords, `glass` = after the mirror define, `milli` = what the shell received, `act` = shell action mask (`0x11` = start cart). `src=synth-tap` is the runner's tap-to-launch confirm. Touch a known corner: if `milli` names the opposite corner from your finger, the mirror define is wrong; `irq_edges` growing with no matching DOWN line means reports still die before the drain read |
+| `TOY-PROD-TOUCHDBG src=real\|synth-tap id=… raw=(x,y) glass=(x,y) milli=(x,y) screen=… act=0x… mirror=… quadrant=… irq_edges=…` | one line per touch DOWN acted on (never MOVE/UP): `raw` = controller coords, `glass` = after the mirror define, `milli` = what the shell received, `act` = shell action mask (`0x11` = start cart). `src=synth-tap` is the runner's tap-to-launch confirm. Touch a known corner: if `milli` names the opposite corner from your finger **at quadrant 0**, the mirror define is wrong; at `quadrant=` ≠ 0, `milli` is picture coords and legitimately differs from `glass` by the rotation (toy5-rotate); `irq_edges` growing with no matching DOWN line means reports still die before the drain read |
 | `TOY-PROD-IMU ok …` / `TOY-PROD-CAL ok bias_mdps=…` or `skipped` | IMU up; dial zero accepted or declined |
+| `TOY-PROD-ORIENT quadrant=<0..3>` | gravity quadrant changed (toy5-rotate): the picture, touch and tilt now present in this quadrant (0 = boot orientation, +1 per 90° clockwise turn of the device). One line per change; never at boot, never per frame |
 | `TOY-PROD-SHELL carts=… touch=… imu=…` | shell live, which senses survived |
 | `TOY-PROD-EVENT screen=<name> cart=<name>` | every screen change |
 | `TOY-PROD-EVENT start cart=… params=… hash=…` | cart reset + step-0 params applied; hash is the post-setup state (a boot-resumed start reads `resumed=1` instead of `params=…`; hash is the restored state) |
@@ -479,6 +550,24 @@ backwards; each is a one-define flip, deliberately.
     cart (`TOY-PROD-CKPT cleared …`), cut power within
     its first 5 min: boot must show `TOY-PROD-RESUME none`
     and the gallery, not the cart you exited earlier.
+12. **Gravity rotation (toy5-rotate).** In the gallery,
+    turn the device a quarter-turn clockwise and hold it
+    (~1 s): expect one `TOY-PROD-ORIENT quadrant=1` line
+    and the gallery upright in your new hold. Continue
+    through `quadrant=2`, `3`, back to `0`; then lay it
+    flat — no further lines, picture keeps its quadrant.
+    In each hold: tap a cart row (the tapped row must
+    launch), long-press back out, launch **pond** and tip
+    the *picture's* bottom edge down — water must pile
+    toward the picture's bottom. Finally scroll the
+    gallery by rotating in-plane (the dial): selection
+    walks as before and the picture now turns with the
+    device, one `ORIENT` line per settled quarter-turn.
+    *(If the picture turns the wrong way (e.g. left when
+    you turn right), or touch/tilt disagree with the
+    picture in exactly one quadrant, report which — those
+    pin the one open question, the sensor's in-plane axis
+    alignment shared with the tilt signs.)*
 
 ## Known v1 limits
 

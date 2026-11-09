@@ -47,6 +47,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "orientation.h" /* gravity-quadrant vector rotation */
 #include "toy_signal.h" /* core: info/spec/label, param stream id */
 
 /* --- source selection -------------------------------------------
@@ -132,6 +133,45 @@ static inline void toy_live_feed_transform(const int16_t raw6[6],
         out6[i] = tmp[i];
 }
 
+/* Gravity-quadrant rotation (toy5-rotate): the transform
+ * above produces glass-frame in-plane axes; once the
+ * presenter turns the picture with the device, a feed cart
+ * must receive its in-plane vectors in canonical (picture)
+ * coords or its drawn gravity would rotate AWAY from the
+ * viewer's down (the same reason TILT events rotate in
+ * product_input.h). So the runner uses this form: in-plane
+ * accel (ax,ay) and gyro (gx,gy) pairs are inverse-rotated
+ * by the quadrant; the screen-normal az/gz are unchanged.
+ * Rotation is swap/sign only - magnitudes, |a|, and the
+ * noise character are untouched. Quadrant 0 == the
+ * unrotated transform verbatim. Proof/synthetic paths never
+ * call either form. */
+static inline int16_t toy_live_feed_sat16(int32_t v)
+{
+    if (v > 32767)
+        return 32767;
+    if (v < -32768)
+        return -32768;
+    return (int16_t)v;
+}
+
+static inline void toy_live_feed_transform_rot(const int16_t raw6[6],
+                                               int16_t out6[6],
+                                               int rotation)
+{
+    int16_t tmp[6];
+    toy_live_feed_transform(raw6, tmp);
+    int32_t rx, ry;
+    toy_orient_inv_vec(rotation, tmp[0], tmp[1], &rx, &ry);
+    tmp[0] = toy_live_feed_sat16(rx);
+    tmp[1] = toy_live_feed_sat16(ry);
+    toy_orient_inv_vec(rotation, tmp[3], tmp[4], &rx, &ry);
+    tmp[3] = toy_live_feed_sat16(rx);
+    tmp[4] = toy_live_feed_sat16(ry);
+    for (int i = 0; i < 6; i++)
+        out6[i] = tmp[i];
+}
+
 /* --- hold state + accounting ------------------------------------
  *
  * Runner-owned, never cartridge state (the source is the
@@ -182,14 +222,22 @@ static inline void toy_live_feed_reset_window(toy_live_feed_t *f)
     f->fresh_w = f->rep_w = f->err_w = f->max_age_w = 0;
 }
 
+static inline void toy_live_feed_note_sample_rot(toy_live_feed_t *f,
+                                                 const int16_t raw6[6],
+                                                 uint64_t now_ms,
+                                                 int rotation)
+{
+    toy_live_feed_transform_rot(raw6, f->last, rotation);
+    f->have = true;
+    f->sample_seq++;
+    f->last_good_ms = now_ms;
+}
+
 static inline void toy_live_feed_note_sample(toy_live_feed_t *f,
                                              const int16_t raw6[6],
                                              uint64_t now_ms)
 {
-    toy_live_feed_transform(raw6, f->last);
-    f->have = true;
-    f->sample_seq++;
-    f->last_good_ms = now_ms;
+    toy_live_feed_note_sample_rot(f, raw6, now_ms, 0);
 }
 
 static inline void toy_live_feed_note_error(toy_live_feed_t *f)

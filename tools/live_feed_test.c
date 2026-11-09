@@ -93,6 +93,37 @@ static void test_transform(void)
     toy_live_feed_transform(inplace, inplace);
     CHECK(inplace[0] == 1 && inplace[2] == 3 && inplace[5] == 6,
           "in-place transform is alias-safe");
+
+    /* Quadrant rotation (toy5-rotate): rot 0 == plain
+     * transform; in-plane pairs inverse-rotate, az/gz fixed.
+     * Unrotated (100,-200) -> q1 inv (-y,x) = (200,100);
+     * q2 (-100,200); q3 (-200,-100). Gyro (10,-20) likewise. */
+    int16_t plain[6], rot[6];
+    toy_live_feed_transform(v, plain);
+    toy_live_feed_transform_rot(v, rot, 0);
+    CHECK(memcmp(plain, rot, sizeof plain) == 0,
+          "feed rot 0 == plain transform verbatim");
+    static const int16_t want_xy[4][2] = {
+        { 100, -200 }, { 200, 100 }, { -100, 200 }, { -200, -100 },
+    };
+    static const int16_t want_g[4][2] = {
+        { 10, -20 }, { 20, 10 }, { -10, 20 }, { -20, -10 },
+    };
+    for (int q = 0; q < 4; q++) {
+        toy_live_feed_transform_rot(v, rot, q);
+        CHECK(rot[0] == want_xy[q][0] && rot[1] == want_xy[q][1] &&
+                  rot[3] == want_g[q][0] && rot[4] == want_g[q][1] &&
+                  rot[2] == 300 && rot[5] == -30,
+              "feed in-plane pairs rotate, az/gz unchanged");
+    }
+    /* Held still in quadrant 1 (sensor ax -16384): canonical
+     * feed accel must be ay-only (gpend falls to picture
+     * bottom): unrotated (-16384,0) -> q1 (0,-16384), i.e.
+     * feed falling (-ax,-ay) = (0,+16384) = canon down. */
+    const int16_t rest_q1[6] = { -16384, 0, 0, 0, 0, 0 };
+    toy_live_feed_transform_rot(rest_q1, rot, 1);
+    CHECK(rot[0] == 0 && rot[1] == -16384,
+          "q1 rest: feed falling == canonical down");
 }
 
 static void test_hold_accounting(void)
