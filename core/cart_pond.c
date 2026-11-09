@@ -441,22 +441,52 @@ static void pond_render(const void *st_, toy_fb_t *fb)
      * are the wall: still water at h = 0 by construction;
      * pn_water reads their interior neighbours only via
      * cells that exist, so shrink-wrap the slope reads by
-     * drawing boundary cells from the flat colour. */
+     * drawing boundary cells from the flat colour.
+     *
+     * Cost shape (toy5-render, pixel-identical): a cell's
+     * colour is a pure function of the cell, so pn_water
+     * runs once per interior cell of the row (its soft-
+     * double shading repeated per pixel was this frame's
+     * whole cost on the double-soft-float target: ~80k
+     * calls at 360 for 1,488 interior cells). The pixel
+     * run of cell g is the exact preimage of the original
+     * map (d * PN) / span == g, i.e. d in
+     * [ceil(g*span/PN), ceil((g+1)*span/PN)) - the same
+     * division precomputed into column edges below - and
+     * runs are written straight into the row under the
+     * same [0,w) x [0,h) clip toy_fb_px applies. */
     int half = r - 4;
     if (half < PN) half = PN;
     uint16_t flat = toy_rgb565(14, 58, 110);
-    for (int py = cy - half; py < cy + half; py++) {
-        int gj = ((py - (cy - half)) * PN) / (2 * half);
-        if (gj < 0 || gj >= PN) continue;
+    int span = 2 * half;
+    int col0[PN], col1[PN];
+    for (int g = 0; g < PN; g++) {
+        col0[g] = (g * span + PN - 1) / PN;
+        col1[g] = ((g + 1) * span + PN - 1) / PN;
+    }
+    for (int gj = 0; gj < PN; gj++) {
         int lo = (int)s->span0[gj], hi = (int)s->span1[gj];
         if (hi < lo) continue;
-        for (int px = cx - half; px < cx + half; px++) {
-            int gi = ((px - (cx - half)) * PN) / (2 * half);
-            if (gi < lo || gi > hi) continue;
+        uint16_t rowcol[PN];
+        for (int gi = lo; gi <= hi; gi++) {
             uint16_t c = flat;
             if (gj >= 1 && gj <= PN - 2 && gi >= lo + 1 && gi <= hi - 1)
                 c = pn_water(s, gi, gj);
-            toy_fb_px(fb, px, py, c);
+            rowcol[gi] = c;
+        }
+        int dy0 = (gj * span + PN - 1) / PN;
+        int dy1 = ((gj + 1) * span + PN - 1) / PN;
+        for (int dy = dy0; dy < dy1; dy++) {
+            int py = cy - half + dy;
+            if ((unsigned)py >= (unsigned)fb->h) continue;
+            uint16_t *row = fb->px + (size_t)py * (size_t)fb->w;
+            for (int gi = lo; gi <= hi; gi++) {
+                int px0 = cx - half + col0[gi];
+                int px1 = cx - half + col1[gi];
+                if (px0 < 0) px0 = 0;
+                if (px1 > fb->w) px1 = fb->w;
+                for (int px = px0; px < px1; px++) row[px] = rowcol[gi];
+            }
         }
     }
 
