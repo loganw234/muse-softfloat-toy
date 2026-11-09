@@ -332,3 +332,35 @@ untouched by construction: state after N steps is the same
 as ever (feed/apply/step order and step-0 setup unchanged);
 only how many steps happen per presented frame - runner
 pacing, not cart behaviour - varies with wall clock.
+
+## Addendum (toy5-flush): word-packed PIO feed
+
+At 37.5 MHz the presenter flush measured 54.5 ms/frame
+against the 23.2 ms wire floor: the CPU feed had become the
+bound. The sink pushed one byte per 32-bit FIFO word -
+434,312 blocking FIFO writes per frame. The feed is now
+word-packed: the OSR autopull threshold is 32 bits and each
+FIFO word carries four wire bytes (first byte in bits
+31..24), so a frame is 108,578 FIFO writes. The PIO program
+is unchanged (same two instructions), and the nibble stream
+is bit-identical - the packer is pure header code in
+`display_qspi_pio.h`, pinned by
+`tools/display_qspi_pack_test.c` (exact word sequences, an
+independent OSR/nibble simulation against both the input
+bytes and the old byte-per-word stream, every 1..3-byte
+tail). Partial words are carried across sink calls; a tail
+still pending at CS release is emitted by retargeting the
+pull threshold to exactly the pending bit count for that one
+word, under `wait_idle`'s drained/stalled guarantee (full
+frames and all command streams are multiples of 4 bytes, so
+only odd-area windows take that path). `wait_idle`'s TXSTALL
+drain logic is untouched. The conversion chunk in
+`display_co5300.c` grew 128 -> 512 bytes (the "128-byte
+conversion chunks" in the black-glass narrative above is
+that parcel's history). No DMA: the cycle estimate in the
+toy5-flush report puts the packed feed under the 32-cycle
+per-word wire budget with the row-build bursts the only
+exposed CPU time (predicted `TOY-PROD-PACE flush_us` per
+frame ~25-30 ms, to be convicted at flash time). The TX
+FIFOs were already joined (8 words = 32 wire bytes of slack,
+was 8 bytes).

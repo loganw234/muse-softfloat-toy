@@ -1,9 +1,12 @@
 ; display_qspi.pio - write-only Quad-SPI transmitter for the CO5300.
 ;
 ; One state machine drives SCL as a side-set pin and shifts nibbles
-; onto SI3..SI0. The OSR shifts left with autopull at 8 bits, so
-; each 32-bit FIFO word carries one byte in its top 8 bits and is
-; emitted high nibble first (nibble bit j -> pin SIj).
+; onto SI3..SI0. The OSR shifts left with autopull at 32 bits, so
+; each 32-bit FIFO word carries four wire bytes (first byte in the
+; top 8 bits) and is emitted high nibble first, byte after byte
+; (nibble bit j -> pin SIj). Word packing (toy5-flush) changed only
+; the autopull threshold and the CPU feed in display_qspi_pio.c;
+; this program and the nibble order on the pins are unchanged.
 ;
 ; Two PIO cycles make one SCL period: data changes while SCL is low,
 ; the panel samples on the rising edge (CO5300 datasheet 5.2: data
